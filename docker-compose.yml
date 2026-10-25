@@ -27,7 +27,7 @@ services:
       - NOVATUNNEL_DASHBOARD_PORT=8080
       - NOVATUNNEL_DASHBOARD_SECRET=${NOVATUNNEL_DASHBOARD_SECRET:?Set a unique dashboard secret}
       - NOVATUNNEL_DASHBOARD_USER=${NOVATUNNEL_DASHBOARD_USER:-admin}
-      - NOVATUNNEL_DASHBOARD_PASS=${NOVATUNNEL_DASHBOARD_PASS:-admin123}
+      - NOVATUNNEL_DASHBOARD_PASS=${NOVATUNNEL_DASHBOARD_PASS:?Set a strong dashboard password}
     volumes:
       - ./configs:/etc/novatunnel
       - novatunnel_data:/var/lib/novatunnel

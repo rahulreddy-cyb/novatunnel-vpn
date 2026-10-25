@@ -6,9 +6,37 @@
 [![Encryption](https://img.shields.io/badge/cipher-ChaCha20--Poly1305-green.svg)](https://datatracker.ietf.org/doc/html/rfc8439)
 [![Key Exchange](https://img.shields.io/badge/key%20exchange-X25519%20ECDH-orange.svg)](https://datatracker.ietf.org/doc/html/rfc7748)
 
-**NovaTunnel** is a modern, real-world, high-performance Virtual Private Network (VPN) engine built in Python. It features a custom lightweight binary UDP encapsulation protocol, military-grade **ChaCha20-Poly1305** authenticated encryption (AEAD), **X25519 ECDH** ephemeral key agreement, real Linux **TUN interface** routing, and an integrated real-time web management dashboard.
+**NovaTunnel** is an experimental Virtual Private Network (VPN) project built in Python. It features a custom lightweight binary UDP encapsulation protocol, **ChaCha20-Poly1305** authenticated encryption (AEAD), **X25519 ECDH** ephemeral key agreement, real Linux **TUN interface** routing, and an integrated real-time web management dashboard.
 
-Unlike simple SOCKS/HTTP proxies or TLS tunnels, NovaTunnel is a **true Layer 3 (Network Layer) VPN**. It captures raw IP datagrams, encrypts them, routes them over an authenticated UDP tunnel, and securely delivers full bidirectional Internet connectivity.
+Unlike simple SOCKS/HTTP proxies or TLS tunnels, NovaTunnel is a **true Layer 3 (Network Layer) VPN**. It captures raw IP datagrams, encrypts them, routes them over an authenticated UDP tunnel, and is intended to provide bidirectional IP connectivity.
+
+---
+
+## Project Status
+**Status: Experimental | Security Testing in Progress**
+
+NovaTunnel VPN is a Python-based networking and
+cybersecurity project developed for learning, research,
+and controlled lab testing.
+
+### Key Components
+- Python VPN client and server
+- Linux TUN network interfaces
+- X25519 key exchange
+- ChaCha20-Poly1305 encryption
+- UDP-based VPN communication
+- Flask web management dashboard
+- Docker and systemd deployment support
+
+### Security Notice
+
+This project has not undergone an independent security
+audit. Encryption, authentication, routing, and traffic
+leak protections require further validation.
+
+NovaTunnel is not recommended for protecting sensitive
+production traffic at this stage.
+
 
 ---
 
@@ -48,15 +76,15 @@ Unlike simple SOCKS/HTTP proxies or TLS tunnels, NovaTunnel is a **true Layer 3 
 
 ## Features
 
-- [x] **State-of-the-Art Cryptography**: X25519 Elliptic Curve Diffie-Hellman key exchange combined with ChaCha20-Poly1305 AEAD (RFC 8439) encryption and HKDF-SHA256 key derivation.
+- [x] **Cryptographic Components**: X25519 Elliptic Curve Diffie-Hellman key exchange combined with ChaCha20-Poly1305 AEAD (RFC 8439) encryption and HKDF-SHA256 key derivation.
 - [x] **Real Layer 3 TUN Device**: Interacts directly with Linux `/dev/net/tun` for native IPv4 datagram capture and transmission.
-- [x] **Custom Binary Protocol**: 16-byte zero-overhead fixed header with big-endian serialization and sequence tracking.
-- [x] **Zero Information Leakage**: Reconfigures client routing tables (`0.0.0.0/1` and `128.0.0.0/1`) to route all traffic seamlessly through the encrypted tunnel.
-- [x] **Ephemeral Session Security**: New ephemeral keys negotiated dynamically per session, ensuring Perfect Forward Secrecy (PFS).
+- [x] **Custom Binary Protocol**: 16-byte fixed header with big-endian serialization and sequence tracking.
+- [x] **Full-Tunnel IPv4 Routing**: Supports redirecting IPv4 traffic through the VPN. DNS and IPv6 leak protection remain unverified.
+- [x] **Session Key Agreement**: Implements session key negotiation. Forward secrecy has not been independently verified.
 - [x] **NAT Traversal & Dynamic Roaming**: Endpoint tracking automatically accommodates client IP and port changes without interrupting connections.
 - [x] **Automatic IP Pool Management**: Dynamic DHCP-like IP allocation for connecting clients within configurable subnets (default `10.8.0.0/24`).
 - [x] **Integrated Web Dashboard**: Dark-themed UI crafted with Tailwind CSS featuring real-time peer metrics, traffic graphs, active session management, and configuration downloads.
-- [x] **Production Ready**: Ships with full Systemd service units, Docker containers, Docker Compose manifests, and a 1-click installer.
+- [x] **Deployment Tools**: Includes systemd services, Docker, Docker Compose, and an installer. Production hardening is still required.
 
 ---
 
@@ -119,7 +147,7 @@ You can spin up an entire NovaTunnel VPN server with Docker in 5 simple commands
 
 ```bash
 # 1. Clone the repository
-git clone https://github.com/novatunnel/novatunnel-vpn.git
+git clone https://github.com/rahulreddy-cyb/novatunnel-vpn.git
 cd novatunnel-vpn
 
 # 2. Copy the sample environment configuration
@@ -132,7 +160,7 @@ docker compose up -d --build
 docker compose logs -f novatunnel
 
 # 5. Access the Web Dashboard in your browser
-# Open: http://YOUR_SERVER_IP:8080 (Default login: admin / admin123)
+# Open: http://YOUR_SERVER_IP:8080 (configure unique credentials and restrict dashboard access before use)
 ```
 
 ---
