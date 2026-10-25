@@ -288,6 +288,12 @@ async def client_tun_reader_loop(
             raw_packet = await tun.read_async(2048)
             if not raw_packet or len(raw_packet) < 20:
                 continue
+
+            # NovaTunnel currently transports IPv4 only.
+            if raw_packet[0] >> 4 != 4:
+                logger.debug("Skipping non-IPv4 packet from TUN")
+                continue
+
             protocol.send_data(raw_packet)
         except asyncio.CancelledError:
             break
