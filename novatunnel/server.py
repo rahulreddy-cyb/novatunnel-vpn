@@ -97,23 +97,15 @@ class NovaTunnelServerProtocol(asyncio.DatagramProtocol):
         client_pub_hex = client_pub_bytes.hex()
         logger.info("Received HANDSHAKE_INIT from %s (client pub: %s...)", addr, client_pub_hex[:16])
 
-        # 1. Lookup peer in registry or create an entry
+        # 1. Reject unregistered peers
         peer = self.registry.get_by_public_key(client_pub_hex)
-        if not peer:
-            # Automatic peer registration if space permits
-            try:
-                assigned_ip = self.registry.allocate_ip(subnet=self.vpn_subnet)
-                peer_name = f"peer-{client_pub_hex[:8]}"
-                peer = self.registry.add_peer(
-                    name=peer_name,
-                    public_key_hex=client_pub_hex,
-                    assigned_ip=assigned_ip,
-                    subnet=self.vpn_subnet,
-                )
-                logger.info("Auto-registered new peer '%s' with IP %s", peer_name, assigned_ip)
-            except Exception as e:
-                logger.error("Failed to allocate IP for incoming peer %s: %s", addr, e)
-                return
+
+        if peer is None:
+            logger.warning(
+                "Rejected unregistered VPN peer from %s",
+                addr,
+            )
+            return
 
         # 2. Generate server's ephemeral keypair for this session
         server_priv, server_pub = crypto.generate_keypair()
