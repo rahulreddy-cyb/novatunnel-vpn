@@ -6,6 +6,9 @@ peer registry management, TUN interface I/O, and dashboard integration.
 
 import asyncio
 import json
+import hmac
+import hashlib
+import struct
 import logging
 import os
 import signal
@@ -46,6 +49,7 @@ class NovaTunnelServerProtocol(asyncio.DatagramProtocol):
         vpn_subnet: str,
         dns_servers: list,
         mtu: int = 1420,
+        server_private_key: bytes = None,
     ):
         self.registry = registry
         self.tun = tun
@@ -53,6 +57,7 @@ class NovaTunnelServerProtocol(asyncio.DatagramProtocol):
         self.vpn_subnet = vpn_subnet
         self.dns_servers = dns_servers
         self.mtu = mtu
+        self.server_private_key = server_private_key
         self.transport: Optional[asyncio.DatagramTransport] = None
         self.seq_counter: int = 0
         self._lock = threading.Lock()
@@ -89,10 +94,14 @@ class NovaTunnelServerProtocol(asyncio.DatagramProtocol):
 
     def _handle_handshake_init(self, packet, addr: tuple) -> None:
         """Process client handshake initiation and reply with server credentials."""
-        if len(packet.payload) < 32:
+        if len(packet.payload) != 48:
             logger.warning("Handshake payload too short from %s (%d bytes)", addr, len(packet.payload))
             return
 
+        if not self.server_private_key or len(self.server_private_key) != 32:
+            logger.error("Server authentication key missing; refusing handshake")
+            return
+        client_nonce = packet.payload[32:48]
         client_pub_bytes = packet.payload[:32]
         client_pub_hex = client_pub_bytes.hex()
         logger.info("Received HANDSHAKE_INIT from %s (client pub: %s...)", addr, client_pub_hex[:16])
@@ -139,8 +148,12 @@ class NovaTunnelServerProtocol(asyncio.DatagramProtocol):
         # 7. Encrypt response payload with derived shared secret
         encrypted_config = crypto.encrypt(shared_secret, json_bytes)
 
-        # 8. Frame response: server public key (32 bytes) + encrypted config
-        resp_payload = server_pub + encrypted_config
+        # 8. Prove possession of server's configured static private key.
+        auth_key = crypto.derive_server_auth_key(self.server_private_key, client_pub_bytes)
+        signed_part = (b"NovaTunnel-v2-HANDSHAKE_RESP" + client_nonce +
+                       struct.pack("!I", session_id) + server_pub + encrypted_config)
+        auth_tag = hmac.new(auth_key, signed_part, hashlib.sha256).digest()
+        resp_payload = server_pub + encrypted_config + auth_tag
         with self._lock:
             self.seq_counter += 1
             seq = self.seq_counter
@@ -328,6 +341,24 @@ async def run_server(config_dict: Optional[dict] = None) -> None:
     setup_logging()
     logger.info("Initializing NovaTunnel VPN Server...")
 
+    # A fixed, correctly configured server identity is mandatory.
+    server_priv_hex = str(server_cfg.get("private_key", "")).strip()
+    try:
+        server_private_key = bytes.fromhex(server_priv_hex)
+        if len(server_private_key) != 32:
+            raise ValueError("server private key must be 32 bytes")
+    except (ValueError, TypeError) as e:
+        raise ValueError("Configure a valid server.private_key before starting NovaTunnel") from e
+    from cryptography.hazmat.primitives.asymmetric import x25519
+    from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+    derived_server_public_key = (
+        x25519.X25519PrivateKey.from_private_bytes(server_private_key)
+        .public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+    )
+    configured_server_public_hex = str(server_cfg.get("public_key", "")).strip()
+    if configured_server_public_hex and configured_server_public_hex.lower() != derived_server_public_key.hex():
+        raise ValueError("Configured server public key does not match its private key")
+
     # Load peer registry
     peers_path = server_cfg.get("peers_file", "/etc/novatunnel/peers.json")
     registry = PeerRegistry(storage_path=peers_path)
@@ -382,6 +413,7 @@ async def run_server(config_dict: Optional[dict] = None) -> None:
             vpn_subnet=vpn_subnet,
             dns_servers=dns_servers,
             mtu=mtu,
+            server_private_key=server_private_key,
         ),
         local_addr=(host, port),
     )

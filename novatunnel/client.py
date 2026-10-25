@@ -7,6 +7,10 @@ system routing redirection, ChaCha20-Poly1305 encryption, and keepalive manageme
 import asyncio
 import enum
 import json
+import hmac
+import hashlib
+import struct
+import os
 import logging
 import signal
 import socket
@@ -53,12 +57,15 @@ class NovaTunnelClientProtocol(asyncio.DatagramProtocol):
         client_priv_bytes: bytes,
         client_pub_bytes: bytes,
         tun: TunInterface,
+        expected_server_public_key: bytes = None,
     ):
         self.server_host = server_host
         self.server_port = server_port
         self.client_priv_bytes = client_priv_bytes
         self.client_pub_bytes = client_pub_bytes
         self.tun = tun
+        self.expected_server_public_key = expected_server_public_key
+        self.handshake_nonce = None
 
         self.transport: Optional[asyncio.DatagramTransport] = None
         self.state = ClientState.DISCONNECTED
@@ -104,12 +111,34 @@ class NovaTunnelClientProtocol(asyncio.DatagramProtocol):
 
     def _handle_handshake_resp(self, packet, addr: tuple) -> None:
         """Process server handshake response and establish encrypted tunnel."""
-        if len(packet.payload) < 32 + 12 + 16:
+        if self.state != ClientState.HANDSHAKING:
+            return
+        if not self.expected_server_public_key or len(self.expected_server_public_key) != 32:
+            logger.error("Trusted server public key is not configured; rejecting handshake")
+            return
+        if self.handshake_nonce is None:
+            logger.warning("No active handshake challenge; ignoring response")
+            return
+        if len(packet.payload) < 32 + 12 + 16 + 32:
             logger.error("HANDSHAKE_RESP payload too short (%d bytes)", len(packet.payload))
             return
 
         server_pub_bytes = packet.payload[:32]
-        encrypted_config = packet.payload[32:]
+        encrypted_config = packet.payload[32:-32]
+        received_auth_tag = packet.payload[-32:]
+
+        # Authenticate server's configured static identity before trusting its
+        # ephemeral key or any configuration in the response.
+        auth_key = crypto.derive_server_auth_key(
+            self.client_priv_bytes, self.expected_server_public_key
+        )
+        signed_part = (b"NovaTunnel-v2-HANDSHAKE_RESP" + self.handshake_nonce +
+                       struct.pack("!I", packet.session_id) +
+                       server_pub_bytes + encrypted_config)
+        expected_auth_tag = hmac.new(auth_key, signed_part, hashlib.sha256).digest()
+        if not hmac.compare_digest(received_auth_tag, expected_auth_tag):
+            logger.warning("Rejected response: server identity verification failed")
+            return
 
         try:
             # 1. Derive shared secret via ECDH
@@ -127,6 +156,7 @@ class NovaTunnelClientProtocol(asyncio.DatagramProtocol):
             self.dns_servers = config_data.get("dns", [])
             self.mtu = int(config_data.get("mtu", 1420))
             self.state = ClientState.CONNECTED
+            self.handshake_nonce = None
             self.last_packet_time = time.time()
 
             logger.info("Tunnel negotiated! Assigned IP: %s | Server VPN IP: %s", self.assigned_ip, self.server_vpn_ip)
@@ -161,11 +191,12 @@ class NovaTunnelClientProtocol(asyncio.DatagramProtocol):
             self.seq_num += 1
             seq = self.seq_num
 
+        self.handshake_nonce = os.urandom(16)
         packet = encode_packet(
             ptype=PacketType.HANDSHAKE_INIT,
             session_id=0,
             seq_num=seq,
-            payload=self.client_pub_bytes,
+            payload=self.client_pub_bytes + self.handshake_nonce,
         )
         if self.transport:
             self.transport.sendto(packet, (self.server_host, self.server_port))
@@ -308,6 +339,14 @@ async def run_client(config_dict: Optional[dict] = None) -> None:
         priv_bytes, pub_bytes = crypto.generate_keypair()
         logger.info("Generated ephemeral client keypair")
 
+    server_pub_hex = str(client_cfg.get("server_public_key", "")).strip()
+    try:
+        expected_server_public_key = bytes.fromhex(server_pub_hex)
+        if len(expected_server_public_key) != 32:
+            raise ValueError("server public key must be 32 bytes")
+    except (ValueError, TypeError) as e:
+        raise ValueError("Configure a valid client.server_public_key before connecting") from e
+
     tun = TunInterface(name=tun_name)
     try:
         tun.open()
@@ -328,6 +367,7 @@ async def run_client(config_dict: Optional[dict] = None) -> None:
             client_priv_bytes=priv_bytes,
             client_pub_bytes=pub_bytes,
             tun=tun,
+            expected_server_public_key=expected_server_public_key,
         ),
         local_addr=("0.0.0.0", 0),
     )
