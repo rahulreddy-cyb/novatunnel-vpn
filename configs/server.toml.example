@@ -44,12 +44,12 @@ peers_file = "/etc/novatunnel/peers.json"
 
 [dashboard]
 # Enable or disable the built-in Flask management dashboard.
-enabled = true
+enabled = false
 
 # Dashboard web server bind address.
 # Set to "127.0.0.1" to restrict to localhost (recommended with reverse proxy),
 # or "0.0.0.0" to expose directly.
-host = "0.0.0.0"
+host = "127.0.0.1"
 
 # TCP port for web dashboard.
 port = 8080
