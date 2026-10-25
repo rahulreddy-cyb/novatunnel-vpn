@@ -20,6 +20,7 @@ import time
 from typing import Optional, Tuple
 
 from novatunnel import crypto
+from novatunnel.replay import ReplayWindow, seal_data_packet, open_data_packet, CLIENT_TO_SERVER, SERVER_TO_CLIENT
 from novatunnel.config import load_client_config
 from novatunnel.protocol import (
     HEADER_SIZE,
@@ -78,6 +79,7 @@ class NovaTunnelClientProtocol(asyncio.DatagramProtocol):
         self.mtu: int = 1420
 
         self.seq_num: int = 0
+        self.inbound_replay = ReplayWindow()
         self.bytes_sent: int = 0
         self.bytes_recv: int = 0
         self.last_packet_time: float = 0.0
@@ -156,6 +158,7 @@ class NovaTunnelClientProtocol(asyncio.DatagramProtocol):
             self.dns_servers = config_data.get("dns", [])
             self.mtu = int(config_data.get("mtu", 1420))
             self.state = ClientState.CONNECTED
+            self.inbound_replay = ReplayWindow()
             self.handshake_nonce = None
             self.last_packet_time = time.time()
 
@@ -178,7 +181,10 @@ class NovaTunnelClientProtocol(asyncio.DatagramProtocol):
             return
 
         try:
-            ip_packet = crypto.decrypt(self.session_key, packet.payload)
+            ip_packet = open_data_packet(self.session_key, packet, SERVER_TO_CLIENT)
+            if not self.inbound_replay.accept_authenticated(packet.seq_num):
+                logger.warning("Rejected replayed/old server DATA seq=%d", packet.seq_num)
+                return
             self.bytes_recv += len(packet.payload)
             self.last_packet_time = time.time()
             self.tun.write(ip_packet)
@@ -208,18 +214,14 @@ class NovaTunnelClientProtocol(asyncio.DatagramProtocol):
             return
 
         try:
-            encrypted_payload = crypto.encrypt(self.session_key, raw_ip_packet)
-
             with self._lock:
+                if self.seq_num >= 0xFFFFFFFF:
+                    raise OverflowError("Client sequence exhausted; rehandshake required")
                 self.seq_num += 1
                 seq = self.seq_num
 
-            packet = encode_packet(
-                ptype=PacketType.DATA,
-                session_id=self.session_id,
-                seq_num=seq,
-                payload=encrypted_payload,
-            )
+            packet = seal_data_packet(self.session_key, self.session_id, seq,
+                                      raw_ip_packet, CLIENT_TO_SERVER)
 
             if self.transport:
                 self.transport.sendto(packet, (self.server_host, self.server_port))

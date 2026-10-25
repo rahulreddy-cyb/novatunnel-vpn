@@ -18,6 +18,7 @@ import time
 from typing import Optional, Set
 
 from novatunnel import crypto
+from novatunnel.replay import ReplayWindow, seal_data_packet, open_data_packet, CLIENT_TO_SERVER, SERVER_TO_CLIENT
 from novatunnel.config import load_server_config
 from novatunnel.peer import Peer, PeerRegistry
 from novatunnel.protocol import (
@@ -60,6 +61,7 @@ class NovaTunnelServerProtocol(asyncio.DatagramProtocol):
         self.server_private_key = server_private_key
         self.transport: Optional[asyncio.DatagramTransport] = None
         self.seq_counter: int = 0
+        self.inbound_replay_windows = {}  # inbound session_id -> ReplayWindow
         self._lock = threading.Lock()
 
     def connection_made(self, transport: asyncio.DatagramTransport) -> None:
@@ -125,7 +127,10 @@ class NovaTunnelServerProtocol(asyncio.DatagramProtocol):
         # 4. Generate random uint32 session identifier
         session_id = crypto.generate_session_id()
 
-        # 5. Update peer record with active session info
+        # 5. Replace replay state for the previous and current session.
+        if peer.session_id:
+            self.inbound_replay_windows.pop(peer.session_id, None)
+        self.inbound_replay_windows[session_id] = ReplayWindow()
         peer.session_id = session_id
         peer.session_key_hex = shared_secret.hex()
         peer.endpoint_ip = addr[0]
@@ -178,9 +183,14 @@ class NovaTunnelServerProtocol(asyncio.DatagramProtocol):
 
         session_key = bytes.fromhex(peer.session_key_hex)
         try:
-            ip_packet = crypto.decrypt(session_key, packet.payload)
+            ip_packet = open_data_packet(session_key, packet, CLIENT_TO_SERVER)
         except Exception as e:
             logger.warning("Decryption failed for peer %s (%s): %s", peer.name, addr, e)
+            return
+
+        replay = self.inbound_replay_windows.setdefault(packet.session_id, ReplayWindow())
+        if not replay.accept_authenticated(packet.seq_num):
+            logger.warning("Rejected replayed/old client DATA seq=%d", packet.seq_num)
             return
 
         # Update peer statistics and endpoint (handles dynamic NAT / IP roaming)
@@ -221,6 +231,7 @@ class NovaTunnelServerProtocol(asyncio.DatagramProtocol):
         """Handle client disconnection notification."""
         peer = self.registry.get_by_session_id(packet.session_id)
         if peer:
+            self.inbound_replay_windows.pop(peer.session_id, None)
             peer.is_connected = False
             peer.session_id = 0
             peer.session_key_hex = ""
@@ -233,18 +244,14 @@ class NovaTunnelServerProtocol(asyncio.DatagramProtocol):
 
         try:
             session_key = bytes.fromhex(peer.session_key_hex)
-            encrypted_payload = crypto.encrypt(session_key, raw_ip_packet)
-
             with self._lock:
+                if self.seq_counter >= 0xFFFFFFFF:
+                    raise OverflowError("Server sequence exhausted; rekey required")
                 self.seq_counter += 1
                 seq = self.seq_counter
 
-            data_packet = encode_packet(
-                ptype=PacketType.DATA,
-                session_id=peer.session_id,
-                seq_num=seq,
-                payload=encrypted_payload,
-            )
+            data_packet = seal_data_packet(session_key, peer.session_id, seq,
+                                           raw_ip_packet, SERVER_TO_CLIENT)
 
             if self.transport:
                 self.transport.sendto(data_packet, (peer.endpoint_ip, peer.endpoint_port))
