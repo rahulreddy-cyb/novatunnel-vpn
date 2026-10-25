@@ -9,7 +9,11 @@ import logging
 import os
 import secrets
 import time
+import threading
+import math
 from functools import wraps
+from datetime import timedelta
+from urllib.parse import unquote, urlsplit
 from typing import Optional
 
 from flask import (
@@ -26,6 +30,8 @@ from flask import (
     url_for,
 )
 
+from flask_wtf.csrf import CSRFProtect
+
 from novatunnel import crypto
 from novatunnel.config import load_server_config
 from novatunnel.peer import Peer, PeerRegistry
@@ -40,9 +46,30 @@ def login_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
         if not session.get("logged_in"):
-            return redirect(url_for("login", next=request.url))
+            return redirect(url_for("login", next=request.full_path.rstrip("?")))
         return f(*args, **kwargs)
     return decorated_function
+
+
+
+def _safe_next_path(target):
+    """Allow only local absolute-path redirects after login."""
+    if not isinstance(target, str) or not target.startswith("/"):
+        return url_for("index")
+
+    decoded = unquote(target)
+    parsed = urlsplit(decoded)
+
+    if (
+        decoded.startswith("//")
+        or "\\" in decoded
+        or parsed.scheme
+        or parsed.netloc
+        or any(ord(ch) < 32 or ord(ch) == 127 for ch in decoded)
+    ):
+        return url_for("index")
+
+    return target
 
 
 def create_app(
@@ -66,13 +93,42 @@ def create_app(
     cfg_server = server_config or full_cfg.get("server", {})
     cfg_dash = full_cfg.get("dashboard", {})
 
-    app.secret_key = cfg_dash.get("secret_key", secrets.token_hex(32))
-    admin_user = cfg_dash.get("username", "admin")
-    admin_pass = cfg_dash.get("password", "admin")
+    dashboard_secret = cfg_dash.get("secret_key")
+    admin_user = cfg_dash.get("username")
+    admin_pass = cfg_dash.get("password")
 
-    # In-memory storage for generated client keys (so clients can download config with their private key)
-    # peer_id -> {"private_key_hex": str, "public_key_hex": str}
-    client_key_cache = {}
+    if (
+        not isinstance(dashboard_secret, str)
+        or len(dashboard_secret) < 32
+        or dashboard_secret == "change-me-in-production-novatunnel"
+    ):
+        raise RuntimeError(
+            "Configure a strong NOVATUNNEL_DASHBOARD_SECRET"
+        )
+
+    if not isinstance(admin_user, str) or not admin_user.strip():
+        raise RuntimeError("Configure NOVATUNNEL_DASHBOARD_USER")
+
+    if (
+        not isinstance(admin_pass, str)
+        or len(admin_pass) < 12
+        or admin_pass == "admin"
+    ):
+        raise RuntimeError(
+            "Configure a strong NOVATUNNEL_DASHBOARD_PASS"
+        )
+
+    app.secret_key = dashboard_secret
+
+    app.config.update(
+        SESSION_COOKIE_SECURE=True,
+        SESSION_COOKIE_HTTPONLY=True,
+        SESSION_COOKIE_SAMESITE="Lax",
+        PERMANENT_SESSION_LIFETIME=timedelta(minutes=30),
+        SESSION_REFRESH_EACH_REQUEST=False,
+    )
+
+    CSRFProtect(app)
 
     # Initialize or link registry
     if registry is None:
@@ -81,6 +137,18 @@ def create_app(
     else:
         reg = registry
 
+    @app.after_request
+    def protect_provisioning_responses(response):
+        if request.endpoint in {
+            "peers_add",
+            "peers_config",
+            "peers_qrcode",
+        }:
+            response.headers["Cache-Control"] = "no-store, max-age=0"
+            response.headers["Pragma"] = "no-cache"
+            response.headers["X-Content-Type-Options"] = "nosniff"
+        return response
+
     @app.context_processor
     def inject_global_vars():
         return {
@@ -88,20 +156,71 @@ def create_app(
             "version": "1.0.0",
         }
 
+    # Single-process login throttling prototype.
+    login_failures = {}
+    login_blocked_until = {}
+    login_attempts_lock = threading.Lock()
+
+    def login_retry_after(addr):
+        now = time.monotonic()
+        with login_attempts_lock:
+            until = login_blocked_until.get(addr, 0)
+            if until > now:
+                return max(1, math.ceil(until - now))
+            login_blocked_until.pop(addr, None)
+        return 0
+
+    def record_failed_login(addr):
+        now = time.monotonic()
+        with login_attempts_lock:
+            attempts = [
+                t for t in login_failures.get(addr, [])
+                if now - t < 300
+            ]
+            attempts.append(now)
+
+            if len(attempts) >= 5:
+                login_blocked_until[addr] = now + 900
+                login_failures.pop(addr, None)
+            else:
+                login_failures[addr] = attempts
+
+    def clear_failed_logins(addr):
+        with login_attempts_lock:
+            login_failures.pop(addr, None)
+            login_blocked_until.pop(addr, None)
+
     @app.route("/login", methods=["GET", "POST"])
     def login():
         """User login page and credential verification."""
         error = None
         if request.method == "POST":
+            client_ip = request.remote_addr or "unknown"
+            retry_after = login_retry_after(client_ip)
+
+            if retry_after:
+                return (
+                    render_template(
+                        "login.html",
+                        error="Too many login attempts. Try again later."
+                    ),
+                    429,
+                    {"Retry-After": str(retry_after)},
+                )
+
             username = request.form.get("username", "").strip()
             password = request.form.get("password", "").strip()
 
             if secrets.compare_digest(username, admin_user) and secrets.compare_digest(password, admin_pass):
+                clear_failed_logins(client_ip)
+                session.clear()
+                session.permanent = True
                 session["logged_in"] = True
                 session["username"] = username
-                next_page = request.args.get("next") or url_for("index")
+                next_page = _safe_next_path(request.args.get("next"))
                 return redirect(next_page)
             else:
+                record_failed_login(client_ip)
                 error = "Invalid username or password"
 
         return render_template("login.html", error=error)
@@ -158,7 +277,18 @@ def create_app(
     @login_required
     def peers_add():
         """Add a new peer, generate client keypair, and return configuration."""
-        data = request.get_json(silent=True) or request.form
+        if not request.is_json:
+            return jsonify({
+                "success": False,
+                "error": "JSON provisioning required",
+            }), 415
+
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict):
+            return jsonify({
+                "success": False,
+                "error": "Invalid JSON payload",
+            }), 400
         peer_name = data.get("name", "").strip() or f"peer-{secrets.token_hex(3)}"
         custom_ip = data.get("assigned_ip", "").strip() or None
 
@@ -176,25 +306,16 @@ def create_app(
                 assigned_ip=custom_ip,
                 subnet=vpn_subnet,
             )
-            # Store generated client private key in cache for download
-            client_key_cache[peer.peer_id] = {
-                "private_key_hex": client_priv_hex,
-                "public_key_hex": client_pub_hex,
-            }
-
             client_config_str = generate_client_toml(peer, client_priv_hex, cfg_server)
 
-            if request.is_json:
-                return jsonify({
-                    "success": True,
-                    "peer": peer.to_dict(),
-                    "client_private_key": client_priv_hex,
-                    "client_public_key": client_pub_hex,
-                    "config_toml": client_config_str,
-                })
-            else:
-                flash(f"Peer '{peer_name}' created successfully!", "success")
-                return redirect(url_for("peers"))
+            response = jsonify({
+                "success": True,
+                "peer": peer.to_dict(),
+                "client_public_key": client_pub_hex,
+                "config_toml": client_config_str,
+            })
+            response.headers["Cache-Control"] = "no-store"
+            return response
         except Exception as e:
             logger.error("Failed to add peer: %s", e)
             if request.is_json:
@@ -207,7 +328,6 @@ def create_app(
     def peers_delete(peer_id: str):
         """Delete an existing peer by UUID."""
         success = reg.remove_peer(peer_id)
-        client_key_cache.pop(peer_id, None)
 
         if request.is_json:
             return jsonify({"success": success})
@@ -220,44 +340,24 @@ def create_app(
     @app.route("/peers/<peer_id>/config")
     @login_required
     def peers_config(peer_id: str):
-        """Download client TOML configuration for a peer."""
-        peer = reg.get_by_id(peer_id)
-        if not peer:
-            abort(404, "Peer not found")
-
-        cached = client_key_cache.get(peer_id, {})
-        client_priv_hex = cached.get("private_key_hex", "")
-
-        config_str = generate_client_toml(peer, client_priv_hex, cfg_server)
-        filename = f"{peer.name.replace(' ', '_')}-novatunnel.toml"
-
-        return Response(
-            config_str,
-            mimetype="text/plain",
-            headers={"Content-Disposition": f"attachment; filename={filename}"},
-        )
+        """Private keys cannot be retrieved after provisioning."""
+        if reg.get_by_id(peer_id) is None:
+            abort(404)
+        abort(410, description=(
+            "Client configuration was available only during "
+            "provisioning. Reprovision the peer if it was lost."
+        ))
 
     @app.route("/peers/<peer_id>/qrcode")
     @login_required
     def peers_qrcode(peer_id: str):
-        """Generate and stream a QR code image representing the peer configuration."""
-        peer = reg.get_by_id(peer_id)
-        if not peer:
-            abort(404, "Peer not found")
-
-        cached = client_key_cache.get(peer_id, {})
-        client_priv_hex = cached.get("private_key_hex", "")
-        config_str = generate_client_toml(peer, client_priv_hex, cfg_server)
-
-        try:
-            import qrcode
-            img = qrcode.make(config_str)
-            buf = io.BytesIO()
-            img.save(buf, "PNG")
-            buf.seek(0)
-            return send_file(buf, mimetype="image/png")
-        except ImportError:
-            return "QR Code generation requires the 'qrcode' and 'Pillow' packages", 501
+        """Do not regenerate secret-bearing QR codes."""
+        if reg.get_by_id(peer_id) is None:
+            abort(404)
+        abort(410, description=(
+            "Private-key QR codes are no longer retained. "
+            "Reprovision the peer if necessary."
+        ))
 
     # REST APIs
     @app.route("/api/status")
@@ -309,7 +409,14 @@ def generate_client_toml(peer: Peer, client_priv_hex: str, server_config: dict) 
     dns_list = server_config.get("dns", ["1.1.1.1", "8.8.8.8"])
     dns_formatted = ", ".join(f'"{d}"' for d in dns_list)
 
-    priv_line = client_priv_hex if client_priv_hex else "# Generated separately by client"
+    if not isinstance(client_priv_hex, str) or len(client_priv_hex) != 64:
+        raise ValueError("A valid 32-byte client private key is required")
+    try:
+        bytes.fromhex(client_priv_hex)
+    except ValueError as exc:
+        raise ValueError("Invalid client private key encoding") from exc
+
+    priv_line = client_priv_hex
 
     return f"""# NovaTunnel Client Configuration
 # Peer: {peer.name} ({peer.peer_id})
@@ -334,4 +441,4 @@ dns = [{dns_formatted}]
 app = create_app()
 
 if __name__ == "__main__":
-    app.run(host="127.0.0.1", port=8080, debug=True)
+    app.run(host="127.0.0.1", port=8080, debug=False)

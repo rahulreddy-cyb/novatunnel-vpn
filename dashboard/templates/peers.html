@@ -97,16 +97,15 @@
 
                         <!-- Actions -->
                         <td class="py-4 px-5 text-right space-x-2">
-                            <!-- Download config -->
-                            <a href="{{ url_for('peers_config', peer_id=peer.peer_id) }}" title="Download Client Config"
-                               class="inline-flex items-center justify-center w-8 h-8 rounded-lg bg-slate-800 hover:bg-slate-700 text-brand-400 hover:text-white transition">
-                                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
-                                </svg>
-                            </a>
+                            <!-- Config must be saved during provisioning -->
+                            <span class="text-xs text-slate-500"
+                                  title="Private keys are not retained by the server">
+                                Save config at creation
+                            </span>
 
                             <!-- Delete button -->
                             <form method="POST" action="{{ url_for('peers_delete', peer_id=peer.peer_id) }}" class="inline" onsubmit="return confirm('Are you sure you want to revoke this peer?');">
+<input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                                 <button type="submit" title="Revoke & Delete Peer"
                                     class="inline-flex items-center justify-center w-8 h-8 rounded-lg bg-slate-800 hover:bg-rose-900/50 text-slate-400 hover:text-rose-300 transition">
                                     <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -224,13 +223,16 @@
         try {
             const resp = await fetch('/peers/add', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: {
+                    "X-CSRFToken": {{ csrf_token() | tojson }}, 'Content-Type': 'application/json' },
                 body: JSON.stringify({ name: name, assigned_ip: ip })
             });
 
             const result = await resp.json();
             if (result.success) {
                 generatedConfigText = result.config_toml;
+                alert("Save this client configuration now. "
+                    + "NovaTunnel cannot retrieve its private key later.");
                 generatedPeerName = result.peer.name;
                 document.getElementById('modalConfigOutput').value = generatedConfigText;
                 document.getElementById('modalFormStage').classList.add('hidden');
