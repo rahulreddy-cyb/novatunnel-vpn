@@ -16,18 +16,17 @@ services:
       - net.ipv4.ip_forward=1
     ports:
       - "51820:51820/udp"
-      - "8080:8080/tcp"
     environment:
       - NOVATUNNEL_HOST=0.0.0.0
       - NOVATUNNEL_PORT=51820
       - NOVATUNNEL_SUBNET=10.8.0.0/24
       - NOVATUNNEL_SERVER_VPN_IP=10.8.0.1
-      - NOVATUNNEL_DASHBOARD_ENABLED=true
-      - NOVATUNNEL_DASHBOARD_HOST=0.0.0.0
+      - NOVATUNNEL_DASHBOARD_ENABLED=false
+      - NOVATUNNEL_DASHBOARD_HOST=127.0.0.1
       - NOVATUNNEL_DASHBOARD_PORT=8080
-      - NOVATUNNEL_DASHBOARD_SECRET=${NOVATUNNEL_DASHBOARD_SECRET:?Set a unique dashboard secret}
+      - NOVATUNNEL_DASHBOARD_SECRET=${NOVATUNNEL_DASHBOARD_SECRET:-}
       - NOVATUNNEL_DASHBOARD_USER=${NOVATUNNEL_DASHBOARD_USER:-admin}
-      - NOVATUNNEL_DASHBOARD_PASS=${NOVATUNNEL_DASHBOARD_PASS:?Set a strong dashboard password}
+      - NOVATUNNEL_DASHBOARD_PASS=${NOVATUNNEL_DASHBOARD_PASS:-}
     volumes:
       - ./configs:/etc/novatunnel
       - novatunnel_data:/var/lib/novatunnel

@@ -38,12 +38,12 @@ DEFAULT_SERVER_CONFIG: Dict[str, Any] = {
         "peers_file": "/etc/novatunnel/peers.json",
     },
     "dashboard": {
-        "enabled": True,
-        "host": "0.0.0.0",
+        "enabled": False,
+        "host": "127.0.0.1",
         "port": 8080,
-        "secret_key": "change-me-in-production-novatunnel",
+        "secret_key": "",
         "username": "admin",
-        "password": "admin",
+        "password": "",
     },
 }
 

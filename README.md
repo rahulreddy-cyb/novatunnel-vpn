@@ -159,8 +159,8 @@ docker compose up -d --build
 # 4. View server logs and verify operation
 docker compose logs -f novatunnel
 
-# 5. Access the Web Dashboard in your browser
-# Open: http://YOUR_SERVER_IP:8080 (configure unique credentials and restrict dashboard access before use)
+# 5. Dashboard disabled by default; TCP 8080 is not published.
+# See SECURITY.md before configuring optional HTTPS dashboard access.
 ```
 
 ---
@@ -180,7 +180,7 @@ The script will automatically:
 3. Generate cryptographically strong server X25519 keys.
 4. Enable Linux IPv4 kernel forwarding (`net.ipv4.ip_forward = 1`).
 5. Configure the systemd daemon `novatunnel-server.service` and start the VPN.
-6. Display your public key and web dashboard credentials.
+6. Generate server credentials; the dashboard remains disabled by default.
 
 ---
 
@@ -249,9 +249,9 @@ To disconnect, simply press `Ctrl+C`. The client will automatically notify the s
 
 NovaTunnel includes an integrated, responsive dashboard:
 - **Server Health Card**: Live daemon heartbeat, uptime timer, and UDP listener status.
-- **Peer Overview**: Instant overview of connected clients, dynamic remote IP:port endpoints, and active session keys.
+- **Peer Overview**: Instant overview of connected clients, dynamic remote IP:port endpoints, without exposing active session keys.
 - **Bandwidth Tracking**: Live counters of uploaded (Tx) and downloaded (Rx) bytes.
-- **One-Click Provisioning**: Interactive modal to create peers, generate X25519 keypairs, preview `client.toml`, and download configs instantly.
+- **One-Click Provisioning**: Interactive modal to create peers, generate X25519 keypairs, retrieve the initial `client.toml` during one-time provisioning.
 - **Real-Time Polling**: Auto-refreshes metrics without page reloads using the `/api/status` endpoint.
 
 ---
