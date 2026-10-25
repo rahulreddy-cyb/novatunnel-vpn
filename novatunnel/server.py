@@ -18,7 +18,7 @@ import time
 from typing import Optional, Set
 
 from novatunnel import crypto
-from novatunnel.replay import ReplayWindow, seal_data_packet, open_data_packet, CLIENT_TO_SERVER, SERVER_TO_CLIENT
+from novatunnel.replay import ReplayWindow, seal_data_packet, open_data_packet, seal_control_packet, open_control_packet, CLIENT_TO_SERVER, SERVER_TO_CLIENT
 from novatunnel.config import load_server_config
 from novatunnel.peer import Peer, PeerRegistry
 from novatunnel.protocol import (
@@ -205,37 +205,56 @@ class NovaTunnelServerProtocol(asyncio.DatagramProtocol):
         except Exception as e:
             logger.error("Failed to write packet to TUN interface: %s", e)
 
-    def _handle_keepalive(self, packet, addr: tuple) -> None:
-        """Process keepalive packet from client and respond."""
+    def _authenticated_control_peer(self, packet):
+        """Validate control AEAD before consuming the shared inbound window."""
         peer = self.registry.get_by_session_id(packet.session_id)
-        if peer:
-            peer.last_seen = time.time()
-            peer.endpoint_ip = addr[0]
-            peer.endpoint_port = addr[1]
-            peer.is_connected = True
+        if not peer or not peer.is_connected or not peer.session_key_hex:
+            return None
+        try:
+            session_key = bytes.fromhex(peer.session_key_hex)
+            open_control_packet(session_key, packet, CLIENT_TO_SERVER)
+        except Exception:
+            logger.warning("Rejected unauthenticated client control packet")
+            return None
+        replay = self.inbound_replay_windows.setdefault(packet.session_id, ReplayWindow())
+        if not replay.accept_authenticated(packet.seq_num):
+            logger.warning("Rejected replayed client control seq=%d", packet.seq_num)
+            return None
+        return peer
 
+    def _handle_keepalive(self, packet, addr: tuple) -> None:
+        """Process authenticated client keepalive and send authenticated ack."""
+        peer = self._authenticated_control_peer(packet)
+        if peer is None:
+            return
+        peer.last_seen = time.time()
+        peer.endpoint_ip = addr[0]
+        peer.endpoint_port = addr[1]
+
+        try:
             with self._lock:
+                if self.seq_counter >= 0xFFFFFFFF:
+                    raise OverflowError("Server sequence exhausted; rekey required")
                 self.seq_counter += 1
                 seq = self.seq_counter
-
-            resp = encode_packet(
-                ptype=PacketType.KEEPALIVE,
-                session_id=packet.session_id,
-                seq_num=seq,
-                payload=b"",
-            )
+            resp = seal_control_packet(bytes.fromhex(peer.session_key_hex),
+                                       PacketType.KEEPALIVE, packet.session_id,
+                                       seq, SERVER_TO_CLIENT)
             if self.transport:
                 self.transport.sendto(resp, addr)
+        except Exception as e:
+            logger.error("Failed to send authenticated keepalive: %s", e)
 
     def _handle_disconnect(self, packet, addr: tuple) -> None:
-        """Handle client disconnection notification."""
-        peer = self.registry.get_by_session_id(packet.session_id)
-        if peer:
-            self.inbound_replay_windows.pop(peer.session_id, None)
-            peer.is_connected = False
-            peer.session_id = 0
-            peer.session_key_hex = ""
-            logger.info("Peer '%s' (%s) gracefully disconnected", peer.name, addr)
+        """Only authenticated, fresh client disconnect can clear a session."""
+        peer = self._authenticated_control_peer(packet)
+        if peer is None:
+            return
+        self.inbound_replay_windows.pop(peer.session_id, None)
+        peer.is_connected = False
+        peer.session_id = 0
+        peer.session_key_hex = ""
+        logger.info("Peer '%s' (%s) gracefully disconnected", peer.name, addr)
 
     def send_data_to_peer(self, peer: Peer, raw_ip_packet: bytes) -> None:
         """Encrypt and dispatch an IP packet to a specific connected peer."""

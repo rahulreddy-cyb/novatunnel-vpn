@@ -20,7 +20,7 @@ import time
 from typing import Optional, Tuple
 
 from novatunnel import crypto
-from novatunnel.replay import ReplayWindow, seal_data_packet, open_data_packet, CLIENT_TO_SERVER, SERVER_TO_CLIENT
+from novatunnel.replay import ReplayWindow, seal_data_packet, open_data_packet, seal_control_packet, open_control_packet, CLIENT_TO_SERVER, SERVER_TO_CLIENT
 from novatunnel.config import load_client_config
 from novatunnel.protocol import (
     HEADER_SIZE,
@@ -104,12 +104,32 @@ class NovaTunnelClientProtocol(asyncio.DatagramProtocol):
             self._handle_handshake_resp(packet, addr)
         elif ptype == PacketType.DATA:
             self._handle_data(packet)
-        elif ptype == PacketType.KEEPALIVE:
+        elif ptype in (PacketType.KEEPALIVE, PacketType.DISCONNECT):
+            self._handle_control(packet)
+
+    def _handle_control(self, packet) -> None:
+        """Only authenticated, unplayed server control can update state."""
+        if self.state != ClientState.CONNECTED or not self.session_key:
+            return
+        if packet.session_id != self.session_id:
+            return
+        try:
+            open_control_packet(self.session_key, packet, SERVER_TO_CLIENT)
+        except Exception:
+            logger.warning("Rejected unauthenticated server control packet")
+            return
+        if not self.inbound_replay.accept_authenticated(packet.seq_num):
+            logger.warning("Rejected replayed server control seq=%d", packet.seq_num)
+            return
+        if packet.packet_type == PacketType.KEEPALIVE:
             self.last_packet_time = time.time()
-            logger.debug("Received KEEPALIVE ack from server")
-        elif ptype == PacketType.DISCONNECT:
-            logger.warning("Received DISCONNECT signal from server")
+            logger.debug("Received authenticated KEEPALIVE ack from server")
+        elif packet.packet_type == PacketType.DISCONNECT:
+            logger.info("Received authenticated DISCONNECT from server")
             self.state = ClientState.DISCONNECTED
+            self.session_key = None
+            self.session_id = 0
+            self.inbound_replay = ReplayWindow()
 
     def _handle_handshake_resp(self, packet, addr: tuple) -> None:
         """Process server handshake response and establish encrypted tunnel."""
@@ -229,43 +249,29 @@ class NovaTunnelClientProtocol(asyncio.DatagramProtocol):
         except Exception as e:
             logger.error("Failed to send DATA packet to server: %s", e)
 
-    def send_keepalive(self) -> None:
-        """Dispatch periodic KEEPALIVE datagram to keep NAT binding active."""
-        if self.state != ClientState.CONNECTED:
+    def _send_control(self, packet_type) -> None:
+        if self.state != ClientState.CONNECTED or not self.session_key:
             return
+        try:
+            with self._lock:
+                if self.seq_num >= 0xFFFFFFFF:
+                    raise OverflowError("Client sequence exhausted; rehandshake required")
+                self.seq_num += 1
+                seq = self.seq_num
+            packet = seal_control_packet(self.session_key, packet_type,
+                                         self.session_id, seq, CLIENT_TO_SERVER)
+            if self.transport:
+                self.transport.sendto(packet, (self.server_host, self.server_port))
+        except Exception as e:
+            logger.error("Failed to send authenticated control packet: %s", e)
 
-        with self._lock:
-            self.seq_num += 1
-            seq = self.seq_num
-
-        packet = encode_packet(
-            ptype=PacketType.KEEPALIVE,
-            session_id=self.session_id,
-            seq_num=seq,
-            payload=b"",
-        )
-        if self.transport:
-            self.transport.sendto(packet, (self.server_host, self.server_port))
-            logger.debug("Dispatched KEEPALIVE packet")
+    def send_keepalive(self) -> None:
+        """Send an authenticated and replay-protected keepalive."""
+        self._send_control(PacketType.KEEPALIVE)
 
     def send_disconnect(self) -> None:
-        """Notify server of impending graceful shutdown."""
-        if self.state != ClientState.CONNECTED:
-            return
-
-        with self._lock:
-            self.seq_num += 1
-            seq = self.seq_num
-
-        packet = encode_packet(
-            ptype=PacketType.DISCONNECT,
-            session_id=self.session_id,
-            seq_num=seq,
-            payload=b"",
-        )
-        if self.transport:
-            self.transport.sendto(packet, (self.server_host, self.server_port))
-            logger.info("Dispatched DISCONNECT packet to server")
+        """Send an authenticated disconnection notification."""
+        self._send_control(PacketType.DISCONNECT)
 
 
 async def client_tun_reader_loop(

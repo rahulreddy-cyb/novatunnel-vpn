@@ -71,3 +71,35 @@ def open_data_packet(key, packet, direction):
     header = encode_packet(PacketType.DATA, packet.session_id, packet.seq_num,
                            timestamp=packet.timestamp, flags=packet.flags)
     return crypto.decrypt(key, packet.payload, associated_data=_aad(header, direction))
+
+
+CONTROL_DOMAIN = b"NovaTunnel-v4-CONTROL:"
+
+
+def _control_aad(header, direction):
+    if direction not in (CLIENT_TO_SERVER, SERVER_TO_CLIENT):
+        raise ValueError("Invalid authenticated direction")
+    return CONTROL_DOMAIN + direction + header
+
+
+def seal_control_packet(key, packet_type, session_id, seq_num, direction):
+    """Authenticate the control packet type, header and empty payload."""
+    if packet_type not in (PacketType.KEEPALIVE, PacketType.DISCONNECT):
+        raise ValueError("Expected KEEPALIVE or DISCONNECT")
+    if not 1 <= seq_num <= MASK32:
+        raise ValueError("Control sequence out of range; rekey before wrap")
+    header = encode_packet(packet_type, session_id, seq_num, timestamp=int(time.time()))
+    payload = crypto.encrypt(key, b"", associated_data=_control_aad(header, direction))
+    return header + payload
+
+
+def open_control_packet(key, packet, direction):
+    """Decrypt and authenticate the exact control wire header."""
+    if packet.packet_type not in (PacketType.KEEPALIVE, PacketType.DISCONNECT):
+        raise ValueError("Unexpected packet type")
+    header = encode_packet(packet.packet_type, packet.session_id, packet.seq_num,
+                           timestamp=packet.timestamp, flags=packet.flags)
+    contents = crypto.decrypt(key, packet.payload,
+                              associated_data=_control_aad(header, direction))
+    if contents != b"":
+        raise ValueError("Non-empty control payload")
