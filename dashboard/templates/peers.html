@@ -1,0 +1,262 @@
+{% extends "base.html" %}
+
+{% block title %}Peer Management{% endblock %}
+{% block header_title %}Peers & Clients{% endblock %}
+
+{% block content %}
+<div class="space-y-6">
+
+    <!-- Top Action Bar -->
+    <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+        <div>
+            <h2 class="text-xl font-bold text-white tracking-tight">Connected Peers</h2>
+            <p class="text-xs text-slate-400">Add, monitor, and manage cryptographic client credentials and configs</p>
+        </div>
+        <div class="flex items-center gap-3">
+            <button onclick="openAddPeerModal()" class="px-4 py-2.5 bg-brand-600 hover:bg-brand-500 text-white rounded-xl text-xs font-semibold shadow-lg shadow-brand-500/25 transition flex items-center gap-2">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/>
+                </svg>
+                Add New Peer
+            </button>
+        </div>
+    </div>
+
+    <!-- Peers Table Card -->
+    <div class="bg-dark-900 border border-slate-800 rounded-2xl overflow-hidden shadow-2xl">
+        <div class="overflow-x-auto">
+            <table class="w-full text-left border-collapse">
+                <thead>
+                    <tr class="border-b border-slate-800 text-[11px] uppercase tracking-wider text-slate-400 bg-slate-900/60">
+                        <th class="py-3.5 px-5 font-semibold">Peer Identity</th>
+                        <th class="py-3.5 px-5 font-semibold">VPN IP</th>
+                        <th class="py-3.5 px-5 font-semibold">Connection</th>
+                        <th class="py-3.5 px-5 font-semibold">Traffic (Tx / Rx)</th>
+                        <th class="py-3.5 px-5 font-semibold">Public Key</th>
+                        <th class="py-3.5 px-5 font-semibold">Last Seen</th>
+                        <th class="py-3.5 px-5 font-semibold text-right">Actions</th>
+                    </tr>
+                </thead>
+                <tbody id="peers-table-body" class="divide-y divide-slate-800/60 text-sm">
+                    {% for peer in peers %}
+                    <tr class="hover:bg-slate-800/30 transition">
+                        <!-- Identity -->
+                        <td class="py-4 px-5">
+                            <div class="flex items-center gap-3">
+                                <div class="w-8 h-8 rounded-lg bg-slate-800 border border-slate-700/60 flex items-center justify-center text-slate-300 font-semibold text-xs">
+                                    {{ peer.name[:2].upper() }}
+                                </div>
+                                <div>
+                                    <div class="font-medium text-white text-sm">{{ peer.name }}</div>
+                                    <div class="text-[10px] font-mono text-slate-500">{{ peer.peer_id }}</div>
+                                </div>
+                            </div>
+                        </td>
+
+                        <!-- IP -->
+                        <td class="py-4 px-5 font-mono text-xs text-brand-300">
+                            <span class="px-2 py-1 rounded-md bg-brand-950/60 border border-brand-500/20">
+                                {{ peer.assigned_ip }}
+                            </span>
+                        </td>
+
+                        <!-- Status -->
+                        <td class="py-4 px-5">
+                            {% if peer.is_connected %}
+                                <span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                                    <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span> Connected
+                                </span>
+                            {% else %}
+                                <span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-slate-800 text-slate-400 border border-slate-700/60">
+                                    <span class="w-2 h-2 rounded-full bg-slate-500"></span> Disconnected
+                                </span>
+                            {% endif %}
+                        </td>
+
+                        <!-- Traffic -->
+                        <td class="py-4 px-5 font-mono text-xs text-slate-300">
+                            <div><span class="text-indigo-400 font-semibold">&uarr;</span> {{ format_bytes(peer.bytes_sent) }}</div>
+                            <div class="mt-0.5"><span class="text-brand-400 font-semibold">&darr;</span> {{ format_bytes(peer.bytes_recv) }}</div>
+                        </td>
+
+                        <!-- Public Key -->
+                        <td class="py-4 px-5">
+                            <span class="font-mono text-[11px] text-slate-400 bg-slate-950/60 px-2 py-1 rounded border border-slate-800" title="{{ peer.public_key_hex }}">
+                                {{ peer.public_key_hex[:8] }}...{{ peer.public_key_hex[-8:] }}
+                            </span>
+                        </td>
+
+                        <!-- Last Seen -->
+                        <td class="py-4 px-5 text-xs text-slate-400">
+                            {% if peer.last_seen > 0 %}
+                                {{ format_uptime(uptime_now - peer.last_seen if uptime_now is defined else 0) }} ago
+                            {% else %}
+                                <span class="text-slate-600">Never</span>
+                            {% endif %}
+                        </td>
+
+                        <!-- Actions -->
+                        <td class="py-4 px-5 text-right space-x-2">
+                            <!-- Download config -->
+                            <a href="{{ url_for('peers_config', peer_id=peer.peer_id) }}" title="Download Client Config"
+                               class="inline-flex items-center justify-center w-8 h-8 rounded-lg bg-slate-800 hover:bg-slate-700 text-brand-400 hover:text-white transition">
+                                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
+                                </svg>
+                            </a>
+
+                            <!-- Delete button -->
+                            <form method="POST" action="{{ url_for('peers_delete', peer_id=peer.peer_id) }}" class="inline" onsubmit="return confirm('Are you sure you want to revoke this peer?');">
+                                <button type="submit" title="Revoke & Delete Peer"
+                                    class="inline-flex items-center justify-center w-8 h-8 rounded-lg bg-slate-800 hover:bg-rose-900/50 text-slate-400 hover:text-rose-300 transition">
+                                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/>
+                                    </svg>
+                                </button>
+                            </form>
+                        </td>
+                    </tr>
+                    {% else %}
+                    <tr>
+                        <td colspan="7" class="py-12 text-center text-slate-500 text-sm">
+                            <svg class="w-12 h-12 mx-auto text-slate-700 mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z"/>
+                            </svg>
+                            No peers registered yet. Click "Add New Peer" to provision a client.
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+</div>
+
+<!-- Add Peer Modal -->
+<div id="addPeerModal" class="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 hidden flex items-center justify-center p-4">
+    <div class="bg-dark-900 border border-slate-800 rounded-2xl w-full max-w-lg shadow-2xl p-6 relative">
+        <div class="flex items-center justify-between pb-4 border-b border-slate-800">
+            <h3 class="text-lg font-bold text-white">Generate Client Peer</h3>
+            <button onclick="closeAddPeerModal()" class="text-slate-400 hover:text-white">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+                </svg>
+            </button>
+        </div>
+
+        <!-- Form Stage -->
+        <div id="modalFormStage" class="mt-4 space-y-4">
+            <div>
+                <label for="peerNameInput" class="block text-xs font-semibold uppercase text-slate-300 mb-1.5">Peer Name / Identifier</label>
+                <input type="text" id="peerNameInput" placeholder="e.g. alice-laptop"
+                    class="w-full bg-slate-950 border border-slate-700 rounded-xl px-4 py-2.5 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-brand-500">
+            </div>
+
+            <div>
+                <label for="peerIpInput" class="block text-xs font-semibold uppercase text-slate-300 mb-1.5">Custom VPN IP (Optional)</label>
+                <input type="text" id="peerIpInput" placeholder="Leave empty for auto-allocation (e.g. 10.8.0.2)"
+                    class="w-full bg-slate-950 border border-slate-700 rounded-xl px-4 py-2.5 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-brand-500">
+            </div>
+
+            <div class="pt-2 flex justify-end gap-3">
+                <button type="button" onclick="closeAddPeerModal()" class="px-4 py-2 rounded-xl text-xs font-medium text-slate-400 hover:bg-slate-800">
+                    Cancel
+                </button>
+                <button type="button" id="submitPeerBtn" onclick="submitAddPeer()" class="px-4 py-2 bg-brand-600 hover:bg-brand-500 text-white rounded-xl text-xs font-semibold shadow-lg shadow-brand-500/20">
+                    Generate Keys & Config
+                </button>
+            </div>
+        </div>
+
+        <!-- Result Stage (After Creation) -->
+        <div id="modalResultStage" class="mt-4 space-y-4 hidden">
+            <div class="p-3 bg-emerald-950/40 border border-emerald-500/40 rounded-xl text-xs text-emerald-300 flex items-center gap-2">
+                <svg class="w-4 h-4 shrink-0 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/>
+                </svg>
+                <span>Peer provisioned successfully! Download or copy the client configuration below:</span>
+            </div>
+
+            <div>
+                <label class="block text-xs font-semibold uppercase text-slate-300 mb-1">Generated client.toml</label>
+                <textarea id="modalConfigOutput" readonly rows="8"
+                    class="w-full font-mono text-xs bg-slate-950 border border-slate-800 rounded-xl p-3 text-slate-200 focus:outline-none"></textarea>
+            </div>
+
+            <div class="flex justify-end gap-3">
+                <button type="button" onclick="downloadGeneratedConfig()" class="px-4 py-2 bg-brand-600 hover:bg-brand-500 text-white rounded-xl text-xs font-semibold shadow">
+                    Download client.toml
+                </button>
+                <button type="button" onclick="window.location.reload()" class="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl text-xs font-medium">
+                    Done & Refresh
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    let generatedConfigText = "";
+    let generatedPeerName = "";
+
+    function openAddPeerModal() {
+        document.getElementById('addPeerModal').classList.remove('hidden');
+        document.getElementById('modalFormStage').classList.remove('hidden');
+        document.getElementById('modalResultStage').classList.add('hidden');
+        document.getElementById('peerNameInput').value = "";
+        document.getElementById('peerIpInput').value = "";
+    }
+
+    function closeAddPeerModal() {
+        document.getElementById('addPeerModal').classList.add('hidden');
+    }
+
+    async function submitAddPeer() {
+        const name = document.getElementById('peerNameInput').value.trim();
+        const ip = document.getElementById('peerIpInput').value.trim();
+        const btn = document.getElementById('submitPeerBtn');
+        btn.disabled = true;
+        btn.innerText = "Generating...";
+
+        try {
+            const resp = await fetch('/peers/add', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name: name, assigned_ip: ip })
+            });
+
+            const result = await resp.json();
+            if (result.success) {
+                generatedConfigText = result.config_toml;
+                generatedPeerName = result.peer.name;
+                document.getElementById('modalConfigOutput').value = generatedConfigText;
+                document.getElementById('modalFormStage').classList.add('hidden');
+                document.getElementById('modalResultStage').classList.remove('hidden');
+            } else {
+                alert('Error creating peer: ' + (result.error || 'Unknown error'));
+            }
+        } catch (e) {
+            alert('Request failed: ' + e);
+        } finally {
+            btn.disabled = false;
+            btn.innerText = "Generate Keys & Config";
+        }
+    }
+
+    function downloadGeneratedConfig() {
+        if (!generatedConfigText) return;
+        const blob = new Blob([generatedConfigText], { type: 'text/plain' });
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = (generatedPeerName || 'client') + '-novatunnel.toml';
+        document.body.appendChild(a);
+        a.click();
+        window.URL.revokeObjectURL(url);
+        document.body.removeChild(a);
+    }
+</script>
+{% endblock %}

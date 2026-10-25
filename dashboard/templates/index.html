@@ -1,0 +1,208 @@
+{% extends "base.html" %}
+
+{% block title %}Dashboard{% endblock %}
+{% block header_title %}Server Overview{% endblock %}
+
+{% block content %}
+<div class="space-y-6">
+
+    <!-- Metrics Cards Grid -->
+    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        
+        <!-- Status Card -->
+        <div class="bg-dark-900 border border-slate-800 rounded-2xl p-5 relative overflow-hidden">
+            <div class="flex items-center justify-between">
+                <span class="text-xs font-semibold text-slate-400 uppercase tracking-wider">VPN Status</span>
+                <span class="w-8 h-8 rounded-xl bg-emerald-500/10 flex items-center justify-center text-emerald-400">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/>
+                    </svg>
+                </span>
+            </div>
+            <div class="mt-4 flex items-center gap-2">
+                <span id="stat-status" class="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                    <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span> {{ stats.status }}
+                </span>
+            </div>
+            <div class="text-[11px] text-slate-500 mt-2">
+                Listening on UDP 51820
+            </div>
+        </div>
+
+        <!-- Active Peers Card -->
+        <div class="bg-dark-900 border border-slate-800 rounded-2xl p-5 relative overflow-hidden">
+            <div class="flex items-center justify-between">
+                <span class="text-xs font-semibold text-slate-400 uppercase tracking-wider">Active Peers</span>
+                <span class="w-8 h-8 rounded-xl bg-brand-500/10 flex items-center justify-center text-brand-400">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z"/>
+                    </svg>
+                </span>
+            </div>
+            <div class="mt-4 flex items-baseline gap-2">
+                <span id="stat-active-peers" class="text-2xl font-bold font-mono text-white">{{ stats.active_count }}</span>
+                <span class="text-xs text-slate-500 font-mono">/ <span id="stat-total-peers">{{ stats.total_count }}</span> total</span>
+            </div>
+            <div class="text-[11px] text-slate-500 mt-2">
+                Subnet: 10.8.0.0/24
+            </div>
+        </div>
+
+        <!-- Traffic Transferred (Tx / Rx) -->
+        <div class="bg-dark-900 border border-slate-800 rounded-2xl p-5 relative overflow-hidden">
+            <div class="flex items-center justify-between">
+                <span class="text-xs font-semibold text-slate-400 uppercase tracking-wider">Total Traffic</span>
+                <span class="w-8 h-8 rounded-xl bg-indigo-500/10 flex items-center justify-center text-indigo-400">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4"/>
+                    </svg>
+                </span>
+            </div>
+            <div class="mt-4 flex items-center justify-between">
+                <div>
+                    <span class="text-[10px] text-slate-400 block uppercase">Outbound (Tx)</span>
+                    <span id="stat-bytes-sent" class="text-sm font-bold font-mono text-white">{{ stats.total_sent_fmt }}</span>
+                </div>
+                <div class="text-right">
+                    <span class="text-[10px] text-slate-400 block uppercase">Inbound (Rx)</span>
+                    <span id="stat-bytes-recv" class="text-sm font-bold font-mono text-white">{{ stats.total_recv_fmt }}</span>
+                </div>
+            </div>
+            <div class="text-[11px] text-slate-500 mt-2">
+                Poly1305 MAC verified
+            </div>
+        </div>
+
+        <!-- Server Uptime Card -->
+        <div class="bg-dark-900 border border-slate-800 rounded-2xl p-5 relative overflow-hidden">
+            <div class="flex items-center justify-between">
+                <span class="text-xs font-semibold text-slate-400 uppercase tracking-wider">Server Uptime</span>
+                <span class="w-8 h-8 rounded-xl bg-amber-500/10 flex items-center justify-center text-amber-400">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                    </svg>
+                </span>
+            </div>
+            <div class="mt-4">
+                <span id="stat-uptime" class="text-xl font-bold font-mono text-white">{{ stats.uptime }}</span>
+            </div>
+            <div class="text-[11px] text-slate-500 mt-2">
+                Zero packet leaks
+            </div>
+        </div>
+
+    </div>
+
+    <!-- Quick Actions & Recent Activity -->
+    <div class="flex items-center justify-between pt-4">
+        <div>
+            <h2 class="text-base font-semibold text-white">Active Tunnel Sessions</h2>
+            <p class="text-xs text-slate-400">Real-time status of connected peers and cryptographic endpoints</p>
+        </div>
+        <div class="flex items-center gap-3">
+            <a href="{{ url_for('peers') }}" class="px-3.5 py-2 bg-brand-600 hover:bg-brand-500 text-white rounded-xl text-xs font-semibold shadow-lg shadow-brand-500/20 transition flex items-center gap-1.5">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/>
+                </svg>
+                Manage All Peers
+            </a>
+        </div>
+    </div>
+
+    <!-- Recent Peers Table -->
+    <div class="bg-dark-900 border border-slate-800 rounded-2xl overflow-hidden shadow-xl">
+        <div class="overflow-x-auto">
+            <table class="w-full text-left border-collapse">
+                <thead>
+                    <tr class="border-b border-slate-800 text-[11px] uppercase tracking-wider text-slate-400 bg-slate-900/50">
+                        <th class="py-3 px-5 font-semibold">Peer Name</th>
+                        <th class="py-3 px-5 font-semibold">Assigned IP</th>
+                        <th class="py-3 px-5 font-semibold">Status</th>
+                        <th class="py-3 px-5 font-semibold">Tx / Rx</th>
+                        <th class="py-3 px-5 font-semibold">Remote Endpoint</th>
+                        <th class="py-3 px-5 font-semibold text-right">Actions</th>
+                    </tr>
+                </thead>
+                <tbody id="recent-peers-tbody" class="divide-y divide-slate-800/60 text-sm">
+                    {% for peer in recent_peers %}
+                    <tr class="hover:bg-slate-800/30 transition">
+                        <td class="py-3.5 px-5 font-medium text-white flex items-center gap-2.5">
+                            <span class="w-2 h-2 rounded-full {% if peer.is_connected %}bg-emerald-400{% else %}bg-slate-600{% endif %}"></span>
+                            <div>
+                                <div>{{ peer.name }}</div>
+                                <div class="text-[10px] font-mono text-slate-500">{{ peer.peer_id[:8] }}...</div>
+                            </div>
+                        </td>
+                        <td class="py-3.5 px-5 font-mono text-xs text-brand-300">
+                            {{ peer.assigned_ip }}
+                        </td>
+                        <td class="py-3.5 px-5">
+                            {% if peer.is_connected %}
+                                <span class="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-medium bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                                    Connected
+                                </span>
+                            {% else %}
+                                <span class="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-medium bg-slate-800 text-slate-400 border border-slate-700/50">
+                                    Idle
+                                </span>
+                            {% endif %}
+                        </td>
+                        <td class="py-3.5 px-5 font-mono text-xs text-slate-300">
+                            <span class="text-indigo-400">&uarr; {{ format_bytes(peer.bytes_sent) }}</span> &bull; 
+                            <span class="text-brand-400">&darr; {{ format_bytes(peer.bytes_recv) }}</span>
+                        </td>
+                        <td class="py-3.5 px-5 font-mono text-xs text-slate-400">
+                            {% if peer.endpoint_ip and peer.endpoint_port %}
+                                {{ peer.endpoint_ip }}:{{ peer.endpoint_port }}
+                            {% else %}
+                                <span class="text-slate-600">&mdash;</span>
+                            {% endif %}
+                        </td>
+                        <td class="py-3.5 px-5 text-right">
+                            <a href="{{ url_for('peers_config', peer_id=peer.peer_id) }}" class="inline-flex items-center gap-1 text-xs text-brand-400 hover:text-brand-300 font-medium">
+                                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
+                                </svg>
+                                Config
+                            </a>
+                        </td>
+                    </tr>
+                    {% else %}
+                    <tr>
+                        <td colspan="6" class="py-8 text-center text-slate-500 text-xs">
+                            No peers registered yet. Click "Manage All Peers" to add your first VPN client.
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    // Live update metrics every 30 seconds
+    async function updateDashboardMetrics() {
+        try {
+            const resp = await fetch('/api/status');
+            if (resp.ok) {
+                const data = await resp.json();
+                document.getElementById('stat-active-peers').innerText = data.active_peers;
+                document.getElementById('stat-total-peers').innerText = data.total_peers;
+                document.getElementById('stat-bytes-sent').innerText = data.bytes_sent_fmt;
+                document.getElementById('stat-bytes-recv').innerText = data.bytes_recv_fmt;
+                document.getElementById('stat-uptime').innerText = data.uptime;
+                const sb = document.getElementById('sidebar-uptime');
+                if (sb) sb.innerText = data.uptime;
+            }
+        } catch (err) {
+            console.debug('Failed to poll status:', err);
+        }
+    }
+
+    setInterval(updateDashboardMetrics, 30000);
+</script>
+{% endblock %}

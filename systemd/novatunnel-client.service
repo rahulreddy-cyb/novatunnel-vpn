@@ -1,0 +1,28 @@
+[Unit]
+Description=NovaTunnel VPN Client Daemon
+Documentation=https://github.com/novatunnel/novatunnel-vpn
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/novatunnel-client connect --config /etc/novatunnel/client.toml
+Restart=on-failure
+RestartSec=5s
+KillMode=process
+
+# Linux Capabilities for client TUN interface creation and routing table management
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+NoNewPrivileges=false
+
+# Security hardening
+ProtectSystem=full
+ProtectHome=read-only
+PrivateTmp=true
+
+# High file descriptor limits
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

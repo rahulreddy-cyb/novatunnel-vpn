@@ -1,0 +1,63 @@
+# ==============================================================================
+# NovaTunnel VPN - Server Configuration Example
+# File: /etc/novatunnel/server.toml
+# ==============================================================================
+
+[server]
+# The network address the UDP listener will bind to.
+# Use "0.0.0.0" to listen on all IPv4 interfaces.
+host = "0.0.0.0"
+
+# UDP port for incoming client handshakes and encrypted tunnels.
+# Default WireGuard-compatible / high-performance port is 51820.
+port = 51820
+
+# Server's static X25519 private key (64 hexadecimal characters / 32 bytes).
+# Generate using: novatunnel-server genkey
+private_key = "<GENERATE_YOUR_OWN_PRIVATE_KEY>"
+
+# Server's matching X25519 public key.
+public_key = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+
+# Virtual IPv4 subnet allocated to the VPN network.
+vpn_subnet = "10.8.0.0/24"
+
+# IP address assigned to the server's virtual TUN interface.
+# Typically the .1 address within the vpn_subnet.
+server_vpn_ip = "10.8.0.1"
+
+# Name of the virtual TUN interface created on the Linux host.
+tun_name = "nova0"
+
+# Maximum Transmission Unit (MTU) for the TUN interface.
+# 1420 prevents UDP packet fragmentation over standard 1500-byte Ethernet.
+mtu = 1420
+
+# DNS servers pushed to connecting VPN clients.
+dns = ["1.1.1.1", "8.8.8.8"]
+
+# Maximum concurrent peers allowed.
+max_peers = 50
+
+# Location of persistent JSON peer database.
+peers_file = "/etc/novatunnel/peers.json"
+
+[dashboard]
+# Enable or disable the built-in Flask management dashboard.
+enabled = true
+
+# Dashboard web server bind address.
+# Set to "127.0.0.1" to restrict to localhost (recommended with reverse proxy),
+# or "0.0.0.0" to expose directly.
+host = "0.0.0.0"
+
+# TCP port for web dashboard.
+port = 8080
+
+# Secret key used for session signing and CSRF protection.
+# Replace with a secure random string in production!
+secret_key = "replace-with-a-very-secure-random-secret-key-in-production"
+
+# Dashboard administrative credentials.
+username = "admin"
+password = "admin_change_me_immediately"

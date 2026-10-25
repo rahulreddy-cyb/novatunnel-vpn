@@ -1,0 +1,26 @@
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual environments
+venv/
+.venv/
+
+# Secrets and environment files
+.env
+.env.*
+!.env.example
+
+# VPN private configuration
+*.conf
+*.key
+*.pem
+*.p12
+*.pfx
+configs/*.toml
+
+# Logs and databases
+*.log
+*.db
+*.sqlite3
