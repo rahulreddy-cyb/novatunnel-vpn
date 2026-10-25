@@ -188,6 +188,33 @@ class NovaTunnelServerProtocol(asyncio.DatagramProtocol):
             logger.warning("Decryption failed for peer %s (%s): %s", peer.name, addr, e)
             return
 
+        # Source-IP validation before replay acceptance.
+        import ipaddress
+
+        try:
+            if len(ip_packet) < 20 or ip_packet[0] >> 4 != 4:
+                raise ValueError("Invalid IPv4 packet")
+
+            ihl = (ip_packet[0] & 15) * 4
+            total = int.from_bytes(ip_packet[2:4], "big")
+
+            if ihl < 20 or total < ihl or total != len(ip_packet):
+                raise ValueError("Malformed IPv4 packet length")
+
+            expected = ipaddress.IPv4Address(
+                peer.assigned_ip
+            ).packed
+
+            if ip_packet[12:16] != expected:
+                raise ValueError("Spoofed source IPv4 address")
+
+        except (ValueError, TypeError, AttributeError) as exc:
+            logger.warning(
+                "Rejected packet from %s: %s",
+                peer.name, exc
+            )
+            return
+
         replay = self.inbound_replay_windows.setdefault(packet.session_id, ReplayWindow())
         if not replay.accept_authenticated(packet.seq_num):
             logger.warning("Rejected replayed/old client DATA seq=%d", packet.seq_num)

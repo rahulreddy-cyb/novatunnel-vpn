@@ -6,6 +6,7 @@ Targeted behavior tests only; not an independent security review.
 """
 import os
 import time
+from ip_test_utils import ipv4_packet
 from novatunnel import crypto
 from novatunnel.client import NovaTunnelClientProtocol, ClientState
 from novatunnel.peer import PeerRegistry
@@ -111,8 +112,8 @@ assert len(server.transport.sent) == 2
 print('PASS: Invalid-tag control does not advance replay window')
 
 # 10: Same sequence across DATA and control must be rejected.
-server.datagram_received(seal_data_packet(key, peer.session_id, 40, b'ip', CLIENT_TO_SERVER), addr)
-assert server.tun.writes[-1] == b'ip'
+server.datagram_received(seal_data_packet(key, peer.session_id, 40, ipv4_packet('10.8.0.2', '10.8.0.1', b'ip'), CLIENT_TO_SERVER), addr)
+assert server.tun.writes[-1] == ipv4_packet('10.8.0.2', '10.8.0.1', b'ip')
 previous_sent = len(server.transport.sent)
 peer.last_seen = 910.0
 server.datagram_received(seal_control_packet(key, PacketType.KEEPALIVE, peer.session_id, 40, CLIENT_TO_SERVER), addr)
