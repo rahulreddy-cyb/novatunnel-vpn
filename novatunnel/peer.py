@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import threading
+import tempfile
 import time
 import uuid
 from dataclasses import dataclass, field, asdict
@@ -34,8 +35,22 @@ class Peer:
     created_at: float = field(default_factory=time.time)
 
     def to_dict(self) -> dict:
-        """Serialize peer to dictionary."""
-        return asdict(self)
+        """Serialize peer metadata without exposing session secrets."""
+        data = asdict(self)
+        data.pop("session_key_hex", None)
+        return data
+
+    def to_storage_dict(self) -> dict:
+        """Persist registration metadata, never live session secrets."""
+        return {
+            "peer_id": self.peer_id,
+            "name": self.name,
+            "public_key_hex": self.public_key_hex,
+            "assigned_ip": self.assigned_ip,
+            "bytes_sent": self.bytes_sent,
+            "bytes_recv": self.bytes_recv,
+            "created_at": self.created_at,
+        }
 
     @classmethod
     def from_dict(cls, data: dict) -> "Peer":
@@ -209,11 +224,22 @@ class PeerRegistry:
 
         with self._lock:
             os.makedirs(os.path.dirname(os.path.abspath(target_path)), exist_ok=True)
-            data = [peer.to_dict() for peer in self._peers.values()]
-            temp_path = f"{target_path}.tmp"
-            with open(temp_path, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2)
-            os.replace(temp_path, target_path)
+            data = [peer.to_storage_dict() for peer in self._peers.values()]
+            directory = os.path.dirname(os.path.abspath(target_path))
+            fd, temp_path = tempfile.mkstemp(
+                prefix=".novatunnel-peers-",
+                suffix=".tmp",
+                dir=directory,
+            )
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    json.dump(data, f, indent=2)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(temp_path, target_path)
+            finally:
+                if os.path.exists(temp_path):
+                    os.unlink(temp_path)
 
     def load_from_file(self, path: Optional[str] = None) -> None:
         """Load peer registry from a JSON file."""
