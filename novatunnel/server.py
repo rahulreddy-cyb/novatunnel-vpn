@@ -319,7 +319,7 @@ async def tun_reader_loop(
     while not stop_event.is_set():
         try:
             # Asynchronous non-blocking read using thread pool to support POSIX TUN fds
-            raw_packet = await loop.run_in_executor(None, tun.read, 2048)
+            raw_packet = await tun.read_async(2048)
             if not raw_packet or len(raw_packet) < 20:
                 continue
 
