@@ -6,6 +6,9 @@ peer registry management, TUN interface I/O, and dashboard integration.
 
 import asyncio
 import json
+import hmac
+import hashlib
+import struct
 import logging
 import os
 import signal
@@ -15,6 +18,7 @@ import time
 from typing import Optional, Set
 
 from novatunnel import crypto
+from novatunnel.replay import ReplayWindow, seal_data_packet, open_data_packet, seal_control_packet, open_control_packet, CLIENT_TO_SERVER, SERVER_TO_CLIENT
 from novatunnel.config import load_server_config
 from novatunnel.peer import Peer, PeerRegistry
 from novatunnel.protocol import (
@@ -46,6 +50,7 @@ class NovaTunnelServerProtocol(asyncio.DatagramProtocol):
         vpn_subnet: str,
         dns_servers: list,
         mtu: int = 1420,
+        server_private_key: bytes = None,
     ):
         self.registry = registry
         self.tun = tun
@@ -53,8 +58,10 @@ class NovaTunnelServerProtocol(asyncio.DatagramProtocol):
         self.vpn_subnet = vpn_subnet
         self.dns_servers = dns_servers
         self.mtu = mtu
+        self.server_private_key = server_private_key
         self.transport: Optional[asyncio.DatagramTransport] = None
         self.seq_counter: int = 0
+        self.inbound_replay_windows = {}  # inbound session_id -> ReplayWindow
         self._lock = threading.Lock()
 
     def connection_made(self, transport: asyncio.DatagramTransport) -> None:
@@ -89,31 +96,27 @@ class NovaTunnelServerProtocol(asyncio.DatagramProtocol):
 
     def _handle_handshake_init(self, packet, addr: tuple) -> None:
         """Process client handshake initiation and reply with server credentials."""
-        if len(packet.payload) < 32:
+        if len(packet.payload) != 48:
             logger.warning("Handshake payload too short from %s (%d bytes)", addr, len(packet.payload))
             return
 
+        if not self.server_private_key or len(self.server_private_key) != 32:
+            logger.error("Server authentication key missing; refusing handshake")
+            return
+        client_nonce = packet.payload[32:48]
         client_pub_bytes = packet.payload[:32]
         client_pub_hex = client_pub_bytes.hex()
         logger.info("Received HANDSHAKE_INIT from %s (client pub: %s...)", addr, client_pub_hex[:16])
 
-        # 1. Lookup peer in registry or create an entry
+        # 1. Reject unregistered peers
         peer = self.registry.get_by_public_key(client_pub_hex)
-        if not peer:
-            # Automatic peer registration if space permits
-            try:
-                assigned_ip = self.registry.allocate_ip(subnet=self.vpn_subnet)
-                peer_name = f"peer-{client_pub_hex[:8]}"
-                peer = self.registry.add_peer(
-                    name=peer_name,
-                    public_key_hex=client_pub_hex,
-                    assigned_ip=assigned_ip,
-                    subnet=self.vpn_subnet,
-                )
-                logger.info("Auto-registered new peer '%s' with IP %s", peer_name, assigned_ip)
-            except Exception as e:
-                logger.error("Failed to allocate IP for incoming peer %s: %s", addr, e)
-                return
+
+        if peer is None:
+            logger.warning(
+                "Rejected unregistered VPN peer from %s",
+                addr,
+            )
+            return
 
         # 2. Generate server's ephemeral keypair for this session
         server_priv, server_pub = crypto.generate_keypair()
@@ -124,7 +127,10 @@ class NovaTunnelServerProtocol(asyncio.DatagramProtocol):
         # 4. Generate random uint32 session identifier
         session_id = crypto.generate_session_id()
 
-        # 5. Update peer record with active session info
+        # 5. Replace replay state for the previous and current session.
+        if peer.session_id:
+            self.inbound_replay_windows.pop(peer.session_id, None)
+        self.inbound_replay_windows[session_id] = ReplayWindow()
         peer.session_id = session_id
         peer.session_key_hex = shared_secret.hex()
         peer.endpoint_ip = addr[0]
@@ -147,8 +153,12 @@ class NovaTunnelServerProtocol(asyncio.DatagramProtocol):
         # 7. Encrypt response payload with derived shared secret
         encrypted_config = crypto.encrypt(shared_secret, json_bytes)
 
-        # 8. Frame response: server public key (32 bytes) + encrypted config
-        resp_payload = server_pub + encrypted_config
+        # 8. Prove possession of server's configured static private key.
+        auth_key = crypto.derive_server_auth_key(self.server_private_key, client_pub_bytes)
+        signed_part = (b"NovaTunnel-v2-HANDSHAKE_RESP" + client_nonce +
+                       struct.pack("!I", session_id) + server_pub + encrypted_config)
+        auth_tag = hmac.new(auth_key, signed_part, hashlib.sha256).digest()
+        resp_payload = server_pub + encrypted_config + auth_tag
         with self._lock:
             self.seq_counter += 1
             seq = self.seq_counter
@@ -173,9 +183,41 @@ class NovaTunnelServerProtocol(asyncio.DatagramProtocol):
 
         session_key = bytes.fromhex(peer.session_key_hex)
         try:
-            ip_packet = crypto.decrypt(session_key, packet.payload)
+            ip_packet = open_data_packet(session_key, packet, CLIENT_TO_SERVER)
         except Exception as e:
             logger.warning("Decryption failed for peer %s (%s): %s", peer.name, addr, e)
+            return
+
+        # Source-IP validation before replay acceptance.
+        import ipaddress
+
+        try:
+            if len(ip_packet) < 20 or ip_packet[0] >> 4 != 4:
+                raise ValueError("Invalid IPv4 packet")
+
+            ihl = (ip_packet[0] & 15) * 4
+            total = int.from_bytes(ip_packet[2:4], "big")
+
+            if ihl < 20 or total < ihl or total != len(ip_packet):
+                raise ValueError("Malformed IPv4 packet length")
+
+            expected = ipaddress.IPv4Address(
+                peer.assigned_ip
+            ).packed
+
+            if ip_packet[12:16] != expected:
+                raise ValueError("Spoofed source IPv4 address")
+
+        except (ValueError, TypeError, AttributeError) as exc:
+            logger.warning(
+                "Rejected packet from %s: %s",
+                peer.name, exc
+            )
+            return
+
+        replay = self.inbound_replay_windows.setdefault(packet.session_id, ReplayWindow())
+        if not replay.accept_authenticated(packet.seq_num):
+            logger.warning("Rejected replayed/old client DATA seq=%d", packet.seq_num)
             return
 
         # Update peer statistics and endpoint (handles dynamic NAT / IP roaming)
@@ -190,36 +232,56 @@ class NovaTunnelServerProtocol(asyncio.DatagramProtocol):
         except Exception as e:
             logger.error("Failed to write packet to TUN interface: %s", e)
 
-    def _handle_keepalive(self, packet, addr: tuple) -> None:
-        """Process keepalive packet from client and respond."""
+    def _authenticated_control_peer(self, packet):
+        """Validate control AEAD before consuming the shared inbound window."""
         peer = self.registry.get_by_session_id(packet.session_id)
-        if peer:
-            peer.last_seen = time.time()
-            peer.endpoint_ip = addr[0]
-            peer.endpoint_port = addr[1]
-            peer.is_connected = True
+        if not peer or not peer.is_connected or not peer.session_key_hex:
+            return None
+        try:
+            session_key = bytes.fromhex(peer.session_key_hex)
+            open_control_packet(session_key, packet, CLIENT_TO_SERVER)
+        except Exception:
+            logger.warning("Rejected unauthenticated client control packet")
+            return None
+        replay = self.inbound_replay_windows.setdefault(packet.session_id, ReplayWindow())
+        if not replay.accept_authenticated(packet.seq_num):
+            logger.warning("Rejected replayed client control seq=%d", packet.seq_num)
+            return None
+        return peer
 
+    def _handle_keepalive(self, packet, addr: tuple) -> None:
+        """Process authenticated client keepalive and send authenticated ack."""
+        peer = self._authenticated_control_peer(packet)
+        if peer is None:
+            return
+        peer.last_seen = time.time()
+        peer.endpoint_ip = addr[0]
+        peer.endpoint_port = addr[1]
+
+        try:
             with self._lock:
+                if self.seq_counter >= 0xFFFFFFFF:
+                    raise OverflowError("Server sequence exhausted; rekey required")
                 self.seq_counter += 1
                 seq = self.seq_counter
-
-            resp = encode_packet(
-                ptype=PacketType.KEEPALIVE,
-                session_id=packet.session_id,
-                seq_num=seq,
-                payload=b"",
-            )
+            resp = seal_control_packet(bytes.fromhex(peer.session_key_hex),
+                                       PacketType.KEEPALIVE, packet.session_id,
+                                       seq, SERVER_TO_CLIENT)
             if self.transport:
                 self.transport.sendto(resp, addr)
+        except Exception as e:
+            logger.error("Failed to send authenticated keepalive: %s", e)
 
     def _handle_disconnect(self, packet, addr: tuple) -> None:
-        """Handle client disconnection notification."""
-        peer = self.registry.get_by_session_id(packet.session_id)
-        if peer:
-            peer.is_connected = False
-            peer.session_id = 0
-            peer.session_key_hex = ""
-            logger.info("Peer '%s' (%s) gracefully disconnected", peer.name, addr)
+        """Only authenticated, fresh client disconnect can clear a session."""
+        peer = self._authenticated_control_peer(packet)
+        if peer is None:
+            return
+        self.inbound_replay_windows.pop(peer.session_id, None)
+        peer.is_connected = False
+        peer.session_id = 0
+        peer.session_key_hex = ""
+        logger.info("Peer '%s' (%s) gracefully disconnected", peer.name, addr)
 
     def send_data_to_peer(self, peer: Peer, raw_ip_packet: bytes) -> None:
         """Encrypt and dispatch an IP packet to a specific connected peer."""
@@ -228,18 +290,14 @@ class NovaTunnelServerProtocol(asyncio.DatagramProtocol):
 
         try:
             session_key = bytes.fromhex(peer.session_key_hex)
-            encrypted_payload = crypto.encrypt(session_key, raw_ip_packet)
-
             with self._lock:
+                if self.seq_counter >= 0xFFFFFFFF:
+                    raise OverflowError("Server sequence exhausted; rekey required")
                 self.seq_counter += 1
                 seq = self.seq_counter
 
-            data_packet = encode_packet(
-                ptype=PacketType.DATA,
-                session_id=peer.session_id,
-                seq_num=seq,
-                payload=encrypted_payload,
-            )
+            data_packet = seal_data_packet(session_key, peer.session_id, seq,
+                                           raw_ip_packet, SERVER_TO_CLIENT)
 
             if self.transport:
                 self.transport.sendto(data_packet, (peer.endpoint_ip, peer.endpoint_port))
@@ -261,7 +319,7 @@ async def tun_reader_loop(
     while not stop_event.is_set():
         try:
             # Asynchronous non-blocking read using thread pool to support POSIX TUN fds
-            raw_packet = await loop.run_in_executor(None, tun.read, 2048)
+            raw_packet = await tun.read_async(2048)
             if not raw_packet or len(raw_packet) < 20:
                 continue
 
@@ -336,6 +394,24 @@ async def run_server(config_dict: Optional[dict] = None) -> None:
     setup_logging()
     logger.info("Initializing NovaTunnel VPN Server...")
 
+    # A fixed, correctly configured server identity is mandatory.
+    server_priv_hex = str(server_cfg.get("private_key", "")).strip()
+    try:
+        server_private_key = bytes.fromhex(server_priv_hex)
+        if len(server_private_key) != 32:
+            raise ValueError("server private key must be 32 bytes")
+    except (ValueError, TypeError) as e:
+        raise ValueError("Configure a valid server.private_key before starting NovaTunnel") from e
+    from cryptography.hazmat.primitives.asymmetric import x25519
+    from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+    derived_server_public_key = (
+        x25519.X25519PrivateKey.from_private_bytes(server_private_key)
+        .public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+    )
+    configured_server_public_hex = str(server_cfg.get("public_key", "")).strip()
+    if configured_server_public_hex and configured_server_public_hex.lower() != derived_server_public_key.hex():
+        raise ValueError("Configured server public key does not match its private key")
+
     # Load peer registry
     peers_path = server_cfg.get("peers_file", "/etc/novatunnel/peers.json")
     registry = PeerRegistry(storage_path=peers_path)
@@ -390,6 +466,7 @@ async def run_server(config_dict: Optional[dict] = None) -> None:
             vpn_subnet=vpn_subnet,
             dns_servers=dns_servers,
             mtu=mtu,
+            server_private_key=server_private_key,
         ),
         local_addr=(host, port),
     )

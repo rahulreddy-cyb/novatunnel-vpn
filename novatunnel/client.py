@@ -7,6 +7,10 @@ system routing redirection, ChaCha20-Poly1305 encryption, and keepalive manageme
 import asyncio
 import enum
 import json
+import hmac
+import hashlib
+import struct
+import os
 import logging
 import signal
 import socket
@@ -16,6 +20,7 @@ import time
 from typing import Optional, Tuple
 
 from novatunnel import crypto
+from novatunnel.replay import ReplayWindow, seal_data_packet, open_data_packet, seal_control_packet, open_control_packet, CLIENT_TO_SERVER, SERVER_TO_CLIENT
 from novatunnel.config import load_client_config
 from novatunnel.protocol import (
     HEADER_SIZE,
@@ -53,12 +58,15 @@ class NovaTunnelClientProtocol(asyncio.DatagramProtocol):
         client_priv_bytes: bytes,
         client_pub_bytes: bytes,
         tun: TunInterface,
+        expected_server_public_key: bytes = None,
     ):
         self.server_host = server_host
         self.server_port = server_port
         self.client_priv_bytes = client_priv_bytes
         self.client_pub_bytes = client_pub_bytes
         self.tun = tun
+        self.expected_server_public_key = expected_server_public_key
+        self.handshake_nonce = None
 
         self.transport: Optional[asyncio.DatagramTransport] = None
         self.state = ClientState.DISCONNECTED
@@ -71,6 +79,7 @@ class NovaTunnelClientProtocol(asyncio.DatagramProtocol):
         self.mtu: int = 1420
 
         self.seq_num: int = 0
+        self.inbound_replay = ReplayWindow()
         self.bytes_sent: int = 0
         self.bytes_recv: int = 0
         self.last_packet_time: float = 0.0
@@ -95,21 +104,63 @@ class NovaTunnelClientProtocol(asyncio.DatagramProtocol):
             self._handle_handshake_resp(packet, addr)
         elif ptype == PacketType.DATA:
             self._handle_data(packet)
-        elif ptype == PacketType.KEEPALIVE:
+        elif ptype in (PacketType.KEEPALIVE, PacketType.DISCONNECT):
+            self._handle_control(packet)
+
+    def _handle_control(self, packet) -> None:
+        """Only authenticated, unplayed server control can update state."""
+        if self.state != ClientState.CONNECTED or not self.session_key:
+            return
+        if packet.session_id != self.session_id:
+            return
+        try:
+            open_control_packet(self.session_key, packet, SERVER_TO_CLIENT)
+        except Exception:
+            logger.warning("Rejected unauthenticated server control packet")
+            return
+        if not self.inbound_replay.accept_authenticated(packet.seq_num):
+            logger.warning("Rejected replayed server control seq=%d", packet.seq_num)
+            return
+        if packet.packet_type == PacketType.KEEPALIVE:
             self.last_packet_time = time.time()
-            logger.debug("Received KEEPALIVE ack from server")
-        elif ptype == PacketType.DISCONNECT:
-            logger.warning("Received DISCONNECT signal from server")
+            logger.debug("Received authenticated KEEPALIVE ack from server")
+        elif packet.packet_type == PacketType.DISCONNECT:
+            logger.info("Received authenticated DISCONNECT from server")
             self.state = ClientState.DISCONNECTED
+            self.session_key = None
+            self.session_id = 0
+            self.inbound_replay = ReplayWindow()
 
     def _handle_handshake_resp(self, packet, addr: tuple) -> None:
         """Process server handshake response and establish encrypted tunnel."""
-        if len(packet.payload) < 32 + 12 + 16:
+        if self.state != ClientState.HANDSHAKING:
+            return
+        if not self.expected_server_public_key or len(self.expected_server_public_key) != 32:
+            logger.error("Trusted server public key is not configured; rejecting handshake")
+            return
+        if self.handshake_nonce is None:
+            logger.warning("No active handshake challenge; ignoring response")
+            return
+        if len(packet.payload) < 32 + 12 + 16 + 32:
             logger.error("HANDSHAKE_RESP payload too short (%d bytes)", len(packet.payload))
             return
 
         server_pub_bytes = packet.payload[:32]
-        encrypted_config = packet.payload[32:]
+        encrypted_config = packet.payload[32:-32]
+        received_auth_tag = packet.payload[-32:]
+
+        # Authenticate server's configured static identity before trusting its
+        # ephemeral key or any configuration in the response.
+        auth_key = crypto.derive_server_auth_key(
+            self.client_priv_bytes, self.expected_server_public_key
+        )
+        signed_part = (b"NovaTunnel-v2-HANDSHAKE_RESP" + self.handshake_nonce +
+                       struct.pack("!I", packet.session_id) +
+                       server_pub_bytes + encrypted_config)
+        expected_auth_tag = hmac.new(auth_key, signed_part, hashlib.sha256).digest()
+        if not hmac.compare_digest(received_auth_tag, expected_auth_tag):
+            logger.warning("Rejected response: server identity verification failed")
+            return
 
         try:
             # 1. Derive shared secret via ECDH
@@ -127,6 +178,8 @@ class NovaTunnelClientProtocol(asyncio.DatagramProtocol):
             self.dns_servers = config_data.get("dns", [])
             self.mtu = int(config_data.get("mtu", 1420))
             self.state = ClientState.CONNECTED
+            self.inbound_replay = ReplayWindow()
+            self.handshake_nonce = None
             self.last_packet_time = time.time()
 
             logger.info("Tunnel negotiated! Assigned IP: %s | Server VPN IP: %s", self.assigned_ip, self.server_vpn_ip)
@@ -148,7 +201,10 @@ class NovaTunnelClientProtocol(asyncio.DatagramProtocol):
             return
 
         try:
-            ip_packet = crypto.decrypt(self.session_key, packet.payload)
+            ip_packet = open_data_packet(self.session_key, packet, SERVER_TO_CLIENT)
+            if not self.inbound_replay.accept_authenticated(packet.seq_num):
+                logger.warning("Rejected replayed/old server DATA seq=%d", packet.seq_num)
+                return
             self.bytes_recv += len(packet.payload)
             self.last_packet_time = time.time()
             self.tun.write(ip_packet)
@@ -161,11 +217,12 @@ class NovaTunnelClientProtocol(asyncio.DatagramProtocol):
             self.seq_num += 1
             seq = self.seq_num
 
+        self.handshake_nonce = os.urandom(16)
         packet = encode_packet(
             ptype=PacketType.HANDSHAKE_INIT,
             session_id=0,
             seq_num=seq,
-            payload=self.client_pub_bytes,
+            payload=self.client_pub_bytes + self.handshake_nonce,
         )
         if self.transport:
             self.transport.sendto(packet, (self.server_host, self.server_port))
@@ -177,18 +234,14 @@ class NovaTunnelClientProtocol(asyncio.DatagramProtocol):
             return
 
         try:
-            encrypted_payload = crypto.encrypt(self.session_key, raw_ip_packet)
-
             with self._lock:
+                if self.seq_num >= 0xFFFFFFFF:
+                    raise OverflowError("Client sequence exhausted; rehandshake required")
                 self.seq_num += 1
                 seq = self.seq_num
 
-            packet = encode_packet(
-                ptype=PacketType.DATA,
-                session_id=self.session_id,
-                seq_num=seq,
-                payload=encrypted_payload,
-            )
+            packet = seal_data_packet(self.session_key, self.session_id, seq,
+                                      raw_ip_packet, CLIENT_TO_SERVER)
 
             if self.transport:
                 self.transport.sendto(packet, (self.server_host, self.server_port))
@@ -196,43 +249,29 @@ class NovaTunnelClientProtocol(asyncio.DatagramProtocol):
         except Exception as e:
             logger.error("Failed to send DATA packet to server: %s", e)
 
-    def send_keepalive(self) -> None:
-        """Dispatch periodic KEEPALIVE datagram to keep NAT binding active."""
-        if self.state != ClientState.CONNECTED:
+    def _send_control(self, packet_type) -> None:
+        if self.state != ClientState.CONNECTED or not self.session_key:
             return
+        try:
+            with self._lock:
+                if self.seq_num >= 0xFFFFFFFF:
+                    raise OverflowError("Client sequence exhausted; rehandshake required")
+                self.seq_num += 1
+                seq = self.seq_num
+            packet = seal_control_packet(self.session_key, packet_type,
+                                         self.session_id, seq, CLIENT_TO_SERVER)
+            if self.transport:
+                self.transport.sendto(packet, (self.server_host, self.server_port))
+        except Exception as e:
+            logger.error("Failed to send authenticated control packet: %s", e)
 
-        with self._lock:
-            self.seq_num += 1
-            seq = self.seq_num
-
-        packet = encode_packet(
-            ptype=PacketType.KEEPALIVE,
-            session_id=self.session_id,
-            seq_num=seq,
-            payload=b"",
-        )
-        if self.transport:
-            self.transport.sendto(packet, (self.server_host, self.server_port))
-            logger.debug("Dispatched KEEPALIVE packet")
+    def send_keepalive(self) -> None:
+        """Send an authenticated and replay-protected keepalive."""
+        self._send_control(PacketType.KEEPALIVE)
 
     def send_disconnect(self) -> None:
-        """Notify server of impending graceful shutdown."""
-        if self.state != ClientState.CONNECTED:
-            return
-
-        with self._lock:
-            self.seq_num += 1
-            seq = self.seq_num
-
-        packet = encode_packet(
-            ptype=PacketType.DISCONNECT,
-            session_id=self.session_id,
-            seq_num=seq,
-            payload=b"",
-        )
-        if self.transport:
-            self.transport.sendto(packet, (self.server_host, self.server_port))
-            logger.info("Dispatched DISCONNECT packet to server")
+        """Send an authenticated disconnection notification."""
+        self._send_control(PacketType.DISCONNECT)
 
 
 async def client_tun_reader_loop(
@@ -246,9 +285,15 @@ async def client_tun_reader_loop(
 
     while not stop_event.is_set():
         try:
-            raw_packet = await loop.run_in_executor(None, tun.read, 2048)
+            raw_packet = await tun.read_async(2048)
             if not raw_packet or len(raw_packet) < 20:
                 continue
+
+            # NovaTunnel currently transports IPv4 only.
+            if raw_packet[0] >> 4 != 4:
+                logger.debug("Skipping non-IPv4 packet from TUN")
+                continue
+
             protocol.send_data(raw_packet)
         except asyncio.CancelledError:
             break
@@ -308,6 +353,14 @@ async def run_client(config_dict: Optional[dict] = None) -> None:
         priv_bytes, pub_bytes = crypto.generate_keypair()
         logger.info("Generated ephemeral client keypair")
 
+    server_pub_hex = str(client_cfg.get("server_public_key", "")).strip()
+    try:
+        expected_server_public_key = bytes.fromhex(server_pub_hex)
+        if len(expected_server_public_key) != 32:
+            raise ValueError("server public key must be 32 bytes")
+    except (ValueError, TypeError) as e:
+        raise ValueError("Configure a valid client.server_public_key before connecting") from e
+
     tun = TunInterface(name=tun_name)
     try:
         tun.open()
@@ -328,6 +381,7 @@ async def run_client(config_dict: Optional[dict] = None) -> None:
             client_priv_bytes=priv_bytes,
             client_pub_bytes=pub_bytes,
             tun=tun,
+            expected_server_public_key=expected_server_public_key,
         ),
         local_addr=("0.0.0.0", 0),
     )

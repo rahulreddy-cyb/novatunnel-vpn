@@ -100,9 +100,10 @@ dns = ["1.1.1.1", "8.8.8.8"]
 max_peers = 50
 peers_file = "/etc/novatunnel/peers.json"
 
+# Disabled by default until secure HTTPS access is configured.
 [dashboard]
-enabled = true
-host = "0.0.0.0"
+enabled = false
+host = "127.0.0.1"
 port = 8080
 secret_key = "${DASHBOARD_SECRET}"
 username = "admin"

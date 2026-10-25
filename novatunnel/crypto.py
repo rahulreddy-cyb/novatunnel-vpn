@@ -151,3 +151,14 @@ def generate_session_id() -> int:
     """
     # Guarantee non-zero uint32
     return secrets.randbelow(0xFFFFFFFE) + 1
+
+
+def derive_server_auth_key(static_private_key: bytes, remote_static_public_key: bytes) -> bytes:
+    """Server-identity proof key. Separate domain from data session keys."""
+    if len(static_private_key) != KEY_LENGTH or len(remote_static_public_key) != KEY_LENGTH:
+        raise ValueError("X25519 server authentication requires two 32-byte keys")
+    private = x25519.X25519PrivateKey.from_private_bytes(static_private_key)
+    public = x25519.X25519PublicKey.from_public_bytes(remote_static_public_key)
+    dh = private.exchange(public)
+    return HKDF(algorithm=hashes.SHA256(), length=KEY_LENGTH, salt=None,
+                info=b"NovaTunnel-v2-server-response-auth").derive(dh)

@@ -3,6 +3,7 @@ NovaTunnel VPN - TUN/TAP Virtual Network Interface
 Creates and manages virtual network interfaces for capturing and injecting IP packets.
 """
 
+import asyncio
 import logging
 import os
 import platform
@@ -139,6 +140,26 @@ class TunInterface:
         if not self.is_open or self.fd is None:
             raise OSError("TUN interface is not open")
         return os.write(self.fd, packet)
+
+    async def read_async(self, size: int = 2048) -> bytes:
+        """Read TUN packets without blocking an executor thread."""
+        loop = asyncio.get_running_loop()
+        fd = self.fileno()
+        future = loop.create_future()
+
+        def on_readable():
+            if future.done():
+                return
+            try:
+                future.set_result(self.read(size))
+            except Exception as exc:
+                future.set_exception(exc)
+
+        loop.add_reader(fd, on_readable)
+        try:
+            return await future
+        finally:
+            loop.remove_reader(fd)
 
     def fileno(self) -> int:
         """Return the underlying file descriptor for event loops."""
